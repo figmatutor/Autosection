@@ -21,8 +21,51 @@ const DEFAULT_SETTINGS = {
         left: 40,
         right: 40
     },
-    spacing: 48
+    spacing: 48,
+    includeText: false // 기본적으로 TextNode 제외
 };
+// 시각적 노드인지 확인하는 함수 (설정에 따라 TextNode 포함/제외)
+function isVisualNode(node, includeText = false) {
+    // 🧪 DEBUG: 노드 타입 로깅
+    console.log(`[DEBUG] isVisualNode 검사: 노드 타입 = ${node.type}, 이름 = "${node.name}", includeText = ${includeText}, visible = ${node.visible}`);
+    const visualNodeTypes = [
+        'FRAME', 'RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR',
+        'COMPONENT', 'INSTANCE', 'GROUP', 'BOOLEAN_OPERATION', 'LINE'
+    ];
+    // TextNode 포함 여부에 따라 추가
+    if (includeText) {
+        visualNodeTypes.push('TEXT');
+    }
+    // includes 대신 직접 검사
+    for (let i = 0; i < visualNodeTypes.length; i++) {
+        if (node.type === visualNodeTypes[i]) {
+            console.log(`[DEBUG] ✅ 시각적 노드로 인식됨: ${node.type}`);
+            return true;
+        }
+    }
+    console.log(`[DEBUG] ❌ 시각적 노드가 아님: ${node.type}`);
+    return false;
+}
+// 레이아웃 가능한 자식 노드들을 필터링하는 함수
+function getLayoutableChildren(section, settings) {
+    var _a;
+    const includeText = (_a = settings === null || settings === void 0 ? void 0 : settings.includeText) !== null && _a !== void 0 ? _a : false;
+    // 🧪 DEBUG: 자식 노드 정보 출력
+    console.log(`[DEBUG] getLayoutableChildren - 섹션: "${section.name}", 자식 노드 수: ${section.children.length}, includeText: ${includeText}`);
+    section.children.forEach((child, index) => {
+        console.log(`[DEBUG] 자식 노드 ${index + 1}: 타입=${child.type}, 이름="${child.name}", visible=${child.visible}, boundingBox=${!!child.absoluteBoundingBox}`);
+    });
+    const layoutableNodes = section.children.filter(child => {
+        // 시각적 노드이고 보이는 노드만 포함
+        const isVisual = isVisualNode(child, includeText);
+        const isVisible = child.visible;
+        const hasBounds = !!child.absoluteBoundingBox;
+        console.log(`[DEBUG] 자식 노드 "${child.name}" 검사: isVisual=${isVisual}, isVisible=${isVisible}, hasBounds=${hasBounds}`);
+        return isVisual && isVisible && hasBounds;
+    });
+    console.log(`[DEBUG] 최종 레이아웃 가능한 노드 수: ${layoutableNodes.length}`);
+    return layoutableNodes;
+}
 // 자동 리사이징을 위한 변수들
 let autoResizeEnabled = false;
 let trackedSections = new Map(); // 섹션 ID -> 정보
@@ -39,50 +82,50 @@ function debounce(func, delay) {
     };
 }
 function arrangeFrames(input, settings) {
-    // 섹션인 경우 자식 프레임들을 가져와서 정렬하고 void 반환
+    // 섹션인 경우 시각적 자식 노드들을 가져와서 정렬하고 void 반환
     if (input instanceof Array === false) {
         const section = input;
-        const frames = section.children.filter(child => child.type === 'FRAME');
-        const result = arrangeFramesInternal(frames, settings);
+        const visualNodes = getLayoutableChildren(section, settings);
+        const result = arrangeFramesInternal(visualNodes, settings);
         return; // void 반환
     }
-    // 프레임 배열인 경우 정렬하고 크기 정보 반환
-    const frames = input;
-    return arrangeFramesInternal(frames, settings);
+    // 노드 배열인 경우 정렬하고 크기 정보 반환
+    const nodes = input;
+    return arrangeFramesInternal(nodes, settings);
 }
-// SECTION 노드용 프레임 정렬 함수
+// SECTION 노드용 시각적 노드 정렬 함수
 function arrangeSectionFrames(section, settings) {
-    const frames = section.children.filter(child => child.type === 'FRAME');
-    if (frames.length === 0)
+    const visualNodes = getLayoutableChildren(section, settings);
+    if (visualNodes.length === 0)
         return;
     if (settings.direction === 'vertical') {
         // 세로 정렬
-        frames.sort((a, b) => a.y - b.y);
+        visualNodes.sort((a, b) => a.y - b.y);
         let currentY = settings.margins.top;
-        frames.forEach((frame, index) => {
-            frame.x = settings.margins.left;
-            frame.y = currentY;
-            if (index < frames.length - 1) {
-                currentY += frame.height + settings.spacing;
+        visualNodes.forEach((node, index) => {
+            node.x = settings.margins.left;
+            node.y = currentY;
+            if (index < visualNodes.length - 1) {
+                currentY += node.height + settings.spacing;
             }
         });
     }
     else {
         // 가로 정렬
-        frames.sort((a, b) => a.x - b.x);
+        visualNodes.sort((a, b) => a.x - b.x);
         let currentX = settings.margins.left;
-        frames.forEach((frame, index) => {
-            frame.x = currentX;
-            frame.y = settings.margins.top;
-            if (index < frames.length - 1) {
-                currentX += frame.width + settings.spacing;
+        visualNodes.forEach((node, index) => {
+            node.x = currentX;
+            node.y = settings.margins.top;
+            if (index < visualNodes.length - 1) {
+                currentX += node.width + settings.spacing;
             }
         });
     }
 }
 // 실제 정렬 로직
-function arrangeFramesInternal(frames, settings) {
-    if (frames.length === 0)
+function arrangeFramesInternal(nodes, settings) {
+    if (nodes.length === 0)
         return { width: 0, height: 0 };
     let totalWidth = 0;
     let totalHeight = 0;
@@ -90,17 +133,17 @@ function arrangeFramesInternal(frames, settings) {
     let maxHeight = 0;
     if (settings.direction === 'vertical') {
         // 세로 정렬
-        frames.sort((a, b) => a.y - b.y);
+        nodes.sort((a, b) => a.y - b.y);
         let currentY = settings.margins.top;
-        frames.forEach((frame, index) => {
-            maxWidth = Math.max(maxWidth, frame.width);
-            frame.x = settings.margins.left;
-            frame.y = currentY;
-            if (index < frames.length - 1) {
-                currentY += frame.height + settings.spacing;
+        nodes.forEach((node, index) => {
+            maxWidth = Math.max(maxWidth, node.width);
+            node.x = settings.margins.left;
+            node.y = currentY;
+            if (index < nodes.length - 1) {
+                currentY += node.height + settings.spacing;
             }
             else {
-                currentY += frame.height;
+                currentY += node.height;
             }
         });
         totalWidth = maxWidth + settings.margins.left + settings.margins.right;
@@ -108,17 +151,17 @@ function arrangeFramesInternal(frames, settings) {
     }
     else {
         // 가로 정렬
-        frames.sort((a, b) => a.x - b.x);
+        nodes.sort((a, b) => a.x - b.x);
         let currentX = settings.margins.left;
-        frames.forEach((frame, index) => {
-            maxHeight = Math.max(maxHeight, frame.height);
-            frame.x = currentX;
-            frame.y = settings.margins.top;
-            if (index < frames.length - 1) {
-                currentX += frame.width + settings.spacing;
+        nodes.forEach((node, index) => {
+            maxHeight = Math.max(maxHeight, node.height);
+            node.x = currentX;
+            node.y = settings.margins.top;
+            if (index < nodes.length - 1) {
+                currentX += node.width + settings.spacing;
             }
             else {
-                currentX += frame.width;
+                currentX += node.width;
             }
         });
         totalWidth = currentX + settings.margins.right;
@@ -145,20 +188,20 @@ function calculateBounds(frames) {
         height: maxY - minY
     };
 }
-// 섹션 내부 프레임들의 경계 계산 (여백 포함)
-function calculateSectionBounds(section) {
-    const frames = section.children.filter(child => child.type === 'FRAME');
-    if (frames.length === 0)
+// 섹션 내부 시각적 노드들의 경계 계산 (여백 포함)
+function calculateSectionBounds(section, settings) {
+    const visualNodes = getLayoutableChildren(section, settings);
+    if (visualNodes.length === 0)
         return { width: 100, height: 100 };
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
-    frames.forEach(frame => {
-        minX = Math.min(minX, frame.x);
-        minY = Math.min(minY, frame.y);
-        maxX = Math.max(maxX, frame.x + frame.width);
-        maxY = Math.max(maxY, frame.y + frame.height);
+    visualNodes.forEach(node => {
+        minX = Math.min(minX, node.x);
+        minY = Math.min(minY, node.y);
+        maxX = Math.max(maxX, node.x + node.width);
+        maxY = Math.max(maxY, node.y + node.height);
     });
     // 기본값을 넣어 안전하게 처리
     const defaultMargin = 40;
@@ -169,17 +212,17 @@ function calculateSectionBounds(section) {
 }
 // SECTION 노드용 크기 조정 함수
 function resizeSectionToFitContent(section, settings) {
-    const frames = section.children.filter(child => child.type === 'FRAME');
-    if (frames.length === 0) {
-        // 프레임이 없으면 최소 크기로 설정
+    const visualNodes = getLayoutableChildren(section, settings);
+    if (visualNodes.length === 0) {
+        // 시각적 노드가 없으면 최소 크기로 설정
         section.resizeWithoutConstraints(settings.margins.left + settings.margins.right, settings.margins.top + settings.margins.bottom);
         return;
     }
     let maxX = 0;
     let maxY = 0;
-    frames.forEach(frame => {
-        maxX = Math.max(maxX, frame.x + frame.width);
-        maxY = Math.max(maxY, frame.y + frame.height);
+    visualNodes.forEach(node => {
+        maxX = Math.max(maxX, node.x + node.width);
+        maxY = Math.max(maxY, node.y + node.height);
     });
     // 여백을 포함한 최종 크기 계산
     const finalWidth = maxX + settings.margins.right;
@@ -188,14 +231,32 @@ function resizeSectionToFitContent(section, settings) {
 }
 // 섹션 생성 함수 (안정성 강화)
 function createSection(settings) {
+    var _a;
     try {
         console.log(`[DEBUG] 섹션 생성 시작, 설정:`, settings);
         const selection = figma.currentPage.selection;
-        const validFrames = selection.filter(node => node.type === 'FRAME' && !node.name.startsWith('AutoSection_'));
-        if (validFrames.length < 2) {
+        const includeText = (_a = settings.includeText) !== null && _a !== void 0 ? _a : false;
+        // 🧪 DEBUG: 선택된 모든 노드 정보 출력
+        console.log(`[DEBUG] 총 선택된 노드 수: ${selection.length}`);
+        selection.forEach((node, index) => {
+            console.log(`[DEBUG] 선택된 노드 ${index + 1}: 타입=${node.type}, 이름="${node.name}", visible=${node.visible}, AutoSection=${node.name.startsWith('AutoSection_')}`);
+        });
+        const validNodes = selection.filter(node => isVisualNode(node, includeText) &&
+            node.visible &&
+            !node.name.startsWith('AutoSection_'));
+        // 🧪 DEBUG: 필터링 결과 상세 출력
+        console.log(`[DEBUG] 필터링 후 유효한 노드 수: ${validNodes.length}`);
+        validNodes.forEach((node, index) => {
+            console.log(`[DEBUG] 유효 노드 ${index + 1}: 타입=${node.type}, 이름="${node.name}"`);
+        });
+        if (validNodes.length < 2) {
+            const nodeTypes = validNodes.map(node => node.type).join(', ');
+            const selectedCount = figma.currentPage.selection.length;
+            const allNodeTypes = selection.map(node => node.type).join(', ');
+            console.log(`[DEBUG] ❌ 유효 노드 부족: 전체 타입=[${allNodeTypes}], 유효 타입=[${nodeTypes}]`);
             figma.ui.postMessage({
                 type: 'error',
-                message: '최소 2개 이상의 프레임을 선택해주세요.'
+                message: `최소 2개 이상의 시각적 객체를 선택해주세요. (선택됨: ${selectedCount}개, 유효: ${validNodes.length}개${nodeTypes ? `, 타입: ${nodeTypes}` : ''})`
             });
             return;
         }
@@ -204,8 +265,8 @@ function createSection(settings) {
             console.log(`[DEBUG] 자동 리사이징 시작`);
             startAutoResizeListener();
         }
-        // 프레임들의 전체 영역 계산
-        const bounds = calculateBounds(validFrames);
+        // 노드들의 전체 영역 계산
+        const bounds = calculateBounds(validNodes);
         // 섹션 이름 생성 (고유 ID 추가)
         const sectionName = `AutoSection_${Date.now()}`;
         console.log(`[DEBUG] 섹션 이름: ${sectionName}`);
@@ -217,11 +278,11 @@ function createSection(settings) {
         // 현재 페이지에 섹션 추가
         figma.currentPage.appendChild(section);
         console.log(`[DEBUG] 섹션 노드 생성 완료`);
-        // 각 프레임을 섹션으로 이동
-        validFrames.forEach(frame => {
-            section.appendChild(frame);
+        // 각 노드를 섹션으로 이동
+        validNodes.forEach(node => {
+            section.appendChild(node);
         });
-        console.log(`[DEBUG] ${validFrames.length}개 프레임을 섹션으로 이동 완료`);
+        console.log(`[DEBUG] ${validNodes.length}개 노드를 섹션으로 이동 완료`);
         console.log(`[DEBUG] ---------- 섹션 초기 레이아웃 적용 ----------`);
         // 1단계: 설정 정보를 pluginData에 즉시 저장
         console.log(`[DEBUG] 1단계 - 설정 정보 저장:`, JSON.stringify(settings, null, 2));
@@ -281,7 +342,7 @@ function createSection(settings) {
         }
         // 4단계: 추적 정보에 즉시 추가
         trackedSections.set(section.id, {
-            frameCount: validFrames.length,
+            frameCount: validNodes.length,
             settings: Object.assign({}, savedSettings)
         });
         console.log(`[DEBUG] 4단계 - 추적 정보 추가 완료`);
@@ -297,12 +358,12 @@ function createSection(settings) {
         // 8단계: 최종 상태 로그
         console.log(`[DEBUG] ========== 섹션 생성 즉시 완료 ==========`);
         console.log(`[DEBUG] 섹션 이름: ${sectionName}`);
-        console.log(`[DEBUG] 프레임 수: ${validFrames.length}개`);
+        console.log(`[DEBUG] 노드 수: ${validNodes.length}개`);
         console.log(`[DEBUG] 최종 섹션 크기: ${section.width} x ${section.height}`);
         console.log(`[DEBUG] 적용된 설정 - 방향: ${savedSettings.direction}, 여백: ${JSON.stringify(savedSettings.margins)}, 간격: ${savedSettings.spacing}`);
         figma.ui.postMessage({
             type: 'success',
-            message: `${validFrames.length}개 프레임으로 섹션이 생성되었습니다!`
+            message: `${validNodes.length}개 객체로 섹션이 생성되었습니다!`
         });
     }
     catch (error) {
@@ -315,11 +376,9 @@ function createSection(settings) {
 }
 // 섹션 내 프레임이 변경되었을 때 자동 리사이징 (완전히 재작성하여 안정성 극대화)
 function autoResizeSection(section, customSettings) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
     try {
         console.log(`[DEBUG] ========== 자동 리사이징 시작: ${section.name} ==========`);
-        const frames = section.children.filter(child => child.type === 'FRAME');
-        console.log(`[DEBUG] 현재 프레임 수: ${frames.length}`);
         // 설정 완전 검증 및 보정
         let settings;
         if (customSettings) {
@@ -331,6 +390,8 @@ function autoResizeSection(section, customSettings) {
             settings = getSectionSettings(section);
             console.log(`[DEBUG] 로드된 설정:`, JSON.stringify(settings, null, 2));
         }
+        const visualNodes = getLayoutableChildren(section, settings);
+        console.log(`[DEBUG] 현재 시각적 노드 수: ${visualNodes.length}`);
         // 설정값 유효성 완전 검증 및 보정
         if (!settings || typeof settings !== 'object') {
             console.error(`[DEBUG] 잘못된 설정값, 기본값 사용`);
@@ -345,12 +406,13 @@ function autoResizeSection(section, customSettings) {
                 left: Math.max(0, Math.min(200, (_f = (_e = settings.margins) === null || _e === void 0 ? void 0 : _e.left) !== null && _f !== void 0 ? _f : 40)),
                 right: Math.max(0, Math.min(200, (_h = (_g = settings.margins) === null || _g === void 0 ? void 0 : _g.right) !== null && _h !== void 0 ? _h : 40))
             },
-            spacing: Math.max(0, Math.min(200, (_j = settings.spacing) !== null && _j !== void 0 ? _j : 48))
+            spacing: Math.max(0, Math.min(200, (_j = settings.spacing) !== null && _j !== void 0 ? _j : 48)),
+            includeText: (_k = settings.includeText) !== null && _k !== void 0 ? _k : false
         };
         console.log(`[DEBUG] 최종 사용할 설정:`, JSON.stringify(settings, null, 2));
-        if (frames.length === 0) {
-            // 프레임이 모두 제거된 경우
-            console.log(`[DEBUG] 프레임이 없음 - 최소 크기로 조정`);
+        if (visualNodes.length === 0) {
+            // 시각적 노드가 모두 제거된 경우
+            console.log(`[DEBUG] 시각적 노드가 없음 - 최소 크기로 조정`);
             const minWidth = settings.margins.left + settings.margins.right;
             const minHeight = settings.margins.top + settings.margins.bottom;
             console.log(`[DEBUG] 최소 크기: ${minWidth} x ${minHeight}`);
@@ -384,8 +446,8 @@ function autoResizeSection(section, customSettings) {
             }
             else {
                 console.log(`[DEBUG] FRAME 노드 처리`);
-                // 프레임 정렬 및 크기 계산
-                const { width, height } = arrangeFrames(frames, settings);
+                // 시각적 노드 정렬 및 크기 계산
+                const { width, height } = arrangeFrames(visualNodes, settings);
                 console.log(`[DEBUG] 계산된 새 크기: ${width} x ${height}`);
                 // 크기 변경이 필요한지 확인 (1px 이상 차이)
                 const widthDiff = Math.abs(section.width - width);
@@ -425,7 +487,7 @@ function autoResizeSection(section, customSettings) {
         console.log(`[DEBUG] 이후 크기: ${afterWidth} x ${afterHeight}`);
         // 추적 정보 강제 업데이트 (최신 설정으로)
         trackedSections.set(section.id, {
-            frameCount: frames.length,
+            frameCount: visualNodes.length,
             settings: Object.assign({}, settings)
         });
         console.log(`[DEBUG] 추적 정보 업데이트 완료`);
@@ -475,15 +537,16 @@ function checkAllAutoSections() {
         allAutoSections.forEach((section, index) => {
             try {
                 console.log(`[DEBUG] ---------- 섹션 ${index + 1}/${allAutoSections.length}: ${section.name} ----------`);
-                const currentFrameCount = section.children.filter(child => child.type === 'FRAME').length;
+                const sectionSettings = getSectionSettings(section);
+                const currentNodeCount = getLayoutableChildren(section, sectionSettings).length;
                 const tracked = trackedSections.get(section.id);
-                console.log(`[DEBUG] 현재 프레임 수: ${currentFrameCount}`);
+                console.log(`[DEBUG] 현재 노드 수: ${currentNodeCount}`);
                 if (!tracked) {
                     console.log(`[DEBUG] 추적되지 않은 섹션 - 새로 추가`);
                     // 새로 발견된 섹션을 추적 목록에 추가
                     const settings = getSectionSettings(section);
                     trackedSections.set(section.id, {
-                        frameCount: currentFrameCount,
+                        frameCount: currentNodeCount,
                         settings: settings
                     });
                     console.log(`[DEBUG] 새 섹션 추적 시작: ${section.name}`);
@@ -496,12 +559,12 @@ function checkAllAutoSections() {
                 // 현재 저장된 설정 확인
                 const currentSettings = getSectionSettings(section);
                 console.log(`[DEBUG] 현재 저장된 설정:`, JSON.stringify(currentSettings, null, 2));
-                // 프레임 개수 변경 감지
-                const frameCountChanged = currentFrameCount !== trackedFrameCount;
+                // 노드 개수 변경 감지
+                const frameCountChanged = currentNodeCount !== trackedFrameCount;
                 // 설정 변경 감지 (JSON 문자열 비교로 정확한 비교)
                 const settingsChanged = JSON.stringify(trackedSettings) !== JSON.stringify(currentSettings);
                 console.log(`[DEBUG] 변경 감지 결과:`);
-                console.log(`  - 프레임 수 변경: ${frameCountChanged} (${trackedFrameCount} → ${currentFrameCount})`);
+                console.log(`  - 노드 수 변경: ${frameCountChanged} (${trackedFrameCount} → ${currentNodeCount})`);
                 console.log(`  - 설정 변경: ${settingsChanged}`);
                 // 변경이 감지되거나 강제 레이아웃 업데이트 필요한 경우
                 if (frameCountChanged || settingsChanged) {
@@ -535,7 +598,7 @@ function checkAllAutoSections() {
                 try {
                     const settings = getSectionSettings(section);
                     trackedSections.set(section.id, {
-                        frameCount: section.children.filter(child => child.type === 'FRAME').length,
+                        frameCount: getLayoutableChildren(section).length,
                         settings: settings
                     });
                     console.log(`[DEBUG] 섹션 ${section.name} 복구 성공`);
@@ -765,13 +828,13 @@ function initializePlugin() {
                 if ((node.type === 'SECTION' && node.name.startsWith('AutoSection_')) ||
                     (node.type === 'FRAME' && node.name.startsWith('AutoSection_'))) {
                     const section = node;
-                    const frames = section.children.filter(child => child.type === 'FRAME');
+                    const visualNodes = getLayoutableChildren(section);
                     const settings = getSectionSettings(section);
                     trackedSections.set(section.id, {
-                        frameCount: frames.length,
+                        frameCount: visualNodes.length,
                         settings: settings
                     });
-                    console.log(`기존 섹션 추적 시작: ${section.name}, ${frames.length}개 프레임`);
+                    console.log(`기존 섹션 추적 시작: ${section.name}, ${visualNodes.length}개 시각적 노드`);
                 }
                 if ('children' in node) {
                     for (const child of node.children) {
@@ -820,13 +883,14 @@ function checkSelectionInfo() {
         selection.forEach((node, index) => {
             console.log(`[DEBUG] 선택 노드 ${index + 1}: ${node.type} - "${node.name}"`);
         });
-        const validFrames = selection.filter(node => node.type === 'FRAME' &&
+        const validNodes = selection.filter(node => isVisualNode(node) &&
+            node.visible &&
             !node.name.startsWith('AutoSection_'));
         // SECTION 노드 또는 AutoSection_ 프레임 찾기
         const sections = selection.filter(node => (node.type === 'SECTION' && node.name.startsWith('AutoSection_')) ||
             (node.type === 'FRAME' && node.name.startsWith('AutoSection_')));
         console.log(`[DEBUG] 필터링 결과:`);
-        console.log(`  - 일반 프레임: ${validFrames.length}개`);
+        console.log(`  - 시각적 노드: ${validNodes.length}개`);
         console.log(`  - AutoSection: ${sections.length}개`);
         // 선택된 섹션이 1개일 때만 방향 정보와 설정 정보 제공
         let selectedSectionDirection = null;
@@ -885,7 +949,7 @@ function checkSelectionInfo() {
         // UI로 전송할 메시지 구성
         const messageData = {
             type: 'selection-info',
-            framesCount: validFrames.length,
+            framesCount: validNodes.length,
             sectionsCount: sections.length,
             selectedSectionDirection: selectedSectionDirection,
             sectionSettings: sectionSettings
@@ -1107,11 +1171,11 @@ function updateSectionLayout(section, newSettings) {
         }
         // 최종적으로 재검증된 설정 사용
         const finalSettings = verifiedSettings;
-        // 3단계: 자식 프레임들 확인
-        const frames = section.children.filter(child => child.type === 'FRAME');
-        console.log(`[LAYOUT] 3단계 - 자식 프레임 수: ${frames.length}`);
-        if (frames.length === 0) {
-            console.log(`[LAYOUT] 프레임이 없어 레이아웃 업데이트 건너뜀`);
+        // 3단계: 자식 시각적 노드들 확인
+        const visualNodes = getLayoutableChildren(section);
+        console.log(`[LAYOUT] 3단계 - 자식 시각적 노드 수: ${visualNodes.length}`);
+        if (visualNodes.length === 0) {
+            console.log(`[LAYOUT] 시각적 노드가 없어 레이아웃 업데이트 건너뜀`);
             return;
         }
         // 4단계: 적용 전 상태 기록
@@ -1149,12 +1213,12 @@ function updateSectionLayout(section, newSettings) {
         console.log(`[LAYOUT] 크기 변경: ${sizeChanged ? '있음' : '없음'}`);
         // 7단계: 추적 정보 업데이트
         trackedSections.set(section.id, {
-            frameCount: frames.length,
+            frameCount: visualNodes.length,
             settings: Object.assign({}, finalSettings)
         });
         console.log(`[LAYOUT] 7단계 - 추적 정보 업데이트 완료`);
         console.log(`[LAYOUT] ========== 레이아웃 업데이트 완료: ${section.name} ==========`);
-        console.log(`[LAYOUT] 최종 결과 - 프레임 수: ${frames.length}, 크기 변경: ${sizeChanged ? '있음' : '없음'}`);
+        console.log(`[LAYOUT] 최종 결과 - 시각적 노드 수: ${visualNodes.length}, 크기 변경: ${sizeChanged ? '있음' : '없음'}`);
     }
     catch (error) {
         console.error('[LAYOUT] ❌ 섹션 레이아웃 업데이트 중 오류:', error);
@@ -1306,12 +1370,12 @@ function updateSelectedSectionSettings(newSettings) {
         }
         // 8단계: 추적 정보 즉시 업데이트
         console.log(`[SETTING] 8단계 - 추적 정보 즉시 업데이트`);
-        const frames = section.children.filter(child => child.type === 'FRAME');
+        const visualNodes = getLayoutableChildren(section);
         trackedSections.set(section.id, {
-            frameCount: frames.length,
+            frameCount: visualNodes.length,
             settings: Object.assign({}, validatedSettings)
         });
-        console.log(`[SETTING] 추적 정보 업데이트 완료: ${frames.length}개 프레임`);
+        console.log(`[SETTING] 추적 정보 업데이트 완료: ${visualNodes.length}개 시각적 노드`);
         // 9단계: 최종 상태 즉시 확인
         console.log(`[SETTING] 9단계 - 최종 상태 즉시 확인`);
         const finalSettings = getSectionSettings(section);

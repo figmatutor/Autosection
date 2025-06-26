@@ -37,6 +37,9 @@ type VisualNode = FrameNode | RectangleNode | EllipseNode | PolygonNode | StarNo
 
 // 시각적 노드인지 확인하는 함수 (설정에 따라 TextNode 포함/제외)
 function isVisualNode(node: SceneNode, includeText: boolean = false): node is VisualNode {
+  // 🧪 DEBUG: 노드 타입 로깅
+  console.log(`[DEBUG] isVisualNode 검사: 노드 타입 = ${node.type}, 이름 = "${node.name}", includeText = ${includeText}, visible = ${node.visible}`);
+  
   const visualNodeTypes = [
     'FRAME', 'RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR',
     'COMPONENT', 'INSTANCE', 'GROUP', 'BOOLEAN_OPERATION', 'LINE'
@@ -50,21 +53,38 @@ function isVisualNode(node: SceneNode, includeText: boolean = false): node is Vi
   // includes 대신 직접 검사
   for (let i = 0; i < visualNodeTypes.length; i++) {
     if (node.type === visualNodeTypes[i]) {
+      console.log(`[DEBUG] ✅ 시각적 노드로 인식됨: ${node.type}`);
       return true;
     }
   }
+  
+  console.log(`[DEBUG] ❌ 시각적 노드가 아님: ${node.type}`);
   return false;
 }
 
 // 레이아웃 가능한 자식 노드들을 필터링하는 함수
 function getLayoutableChildren(section: SectionNode | FrameNode, settings?: SectionSettings): VisualNode[] {
   const includeText = settings?.includeText ?? false;
-  return section.children.filter(child => {
+  
+  // 🧪 DEBUG: 자식 노드 정보 출력
+  console.log(`[DEBUG] getLayoutableChildren - 섹션: "${section.name}", 자식 노드 수: ${section.children.length}, includeText: ${includeText}`);
+  section.children.forEach((child, index) => {
+    console.log(`[DEBUG] 자식 노드 ${index + 1}: 타입=${child.type}, 이름="${child.name}", visible=${child.visible}, boundingBox=${!!child.absoluteBoundingBox}`);
+  });
+  
+  const layoutableNodes = section.children.filter(child => {
     // 시각적 노드이고 보이는 노드만 포함
-    return isVisualNode(child, includeText) && 
-           child.visible && 
-           child.absoluteBoundingBox; // 바운딩 박스가 있는지 확인
+    const isVisual = isVisualNode(child, includeText);
+    const isVisible = child.visible;
+    const hasBounds = !!child.absoluteBoundingBox;
+    
+    console.log(`[DEBUG] 자식 노드 "${child.name}" 검사: isVisual=${isVisual}, isVisible=${isVisible}, hasBounds=${hasBounds}`);
+    
+    return isVisual && isVisible && hasBounds;
   }) as VisualNode[];
+  
+  console.log(`[DEBUG] 최종 레이아웃 가능한 노드 수: ${layoutableNodes.length}`);
+  return layoutableNodes;
 }
 
 // 자동 리사이징을 위한 변수들
@@ -272,15 +292,32 @@ function createSection(settings: SectionSettings): void {
     
     const selection = figma.currentPage.selection;
     const includeText = settings.includeText ?? false;
+    
+    // 🧪 DEBUG: 선택된 모든 노드 정보 출력
+    console.log(`[DEBUG] 총 선택된 노드 수: ${selection.length}`);
+    selection.forEach((node, index) => {
+      console.log(`[DEBUG] 선택된 노드 ${index + 1}: 타입=${node.type}, 이름="${node.name}", visible=${node.visible}, AutoSection=${node.name.startsWith('AutoSection_')}`);
+    });
+    
     const validNodes = selection.filter(node => 
       isVisualNode(node, includeText) && 
       node.visible && 
       !node.name.startsWith('AutoSection_')
     ) as VisualNode[];
 
+    // 🧪 DEBUG: 필터링 결과 상세 출력
+    console.log(`[DEBUG] 필터링 후 유효한 노드 수: ${validNodes.length}`);
+    validNodes.forEach((node, index) => {
+      console.log(`[DEBUG] 유효 노드 ${index + 1}: 타입=${node.type}, 이름="${node.name}"`);
+    });
+
     if (validNodes.length < 2) {
       const nodeTypes = validNodes.map(node => node.type).join(', ');
       const selectedCount = figma.currentPage.selection.length;
+      const allNodeTypes = selection.map(node => node.type).join(', ');
+      
+      console.log(`[DEBUG] ❌ 유효 노드 부족: 전체 타입=[${allNodeTypes}], 유효 타입=[${nodeTypes}]`);
+      
       figma.ui.postMessage({ 
         type: 'error', 
         message: `최소 2개 이상의 시각적 객체를 선택해주세요. (선택됨: ${selectedCount}개, 유효: ${validNodes.length}개${nodeTypes ? `, 타입: ${nodeTypes}` : ''})` 
