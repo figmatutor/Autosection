@@ -35,33 +35,63 @@ const DEFAULT_SETTINGS: SectionSettings = {
 type VisualNode = FrameNode | RectangleNode | EllipseNode | PolygonNode | StarNode | VectorNode | 
                   ComponentNode | InstanceNode | GroupNode | BooleanOperationNode | LineNode | TextNode;
 
-// 성능 최적화를 위한 캐시
-interface NodeCache {
+// 🚀 고급 성능 최적화를 위한 캐시 시스템
+interface AdvancedNodeCache {
   boundingBox: Map<string, { x: number; y: number; width: number; height: number } | null>;
   visualNodeCheck: Map<string, boolean>;
   layoutableChildren: Map<string, VisualNode[]>;
+  sectionSettings: Map<string, SectionSettings>;
+  nodeHash: Map<string, string>; // 노드 상태 해시 캐싱
   lastCacheUpdate: number;
+  hitCount: number;
+  missCount: number;
 }
 
-const nodeCache: NodeCache = {
+const nodeCache: AdvancedNodeCache = {
   boundingBox: new Map(),
   visualNodeCheck: new Map(),
   layoutableChildren: new Map(),
-  lastCacheUpdate: 0
+  sectionSettings: new Map(),
+  nodeHash: new Map(),
+  lastCacheUpdate: 0,
+  hitCount: 0,
+  missCount: 0
 };
 
-// 캐시 유효성 검사 (5초 후 무효화)
-const CACHE_VALIDITY_MS = 5000;
+// 캐시 유효성 검사 (3초로 단축하여 더 민감하게)
+const CACHE_VALIDITY_MS = 3000;
 
 function isCacheValid(): boolean {
   return Date.now() - nodeCache.lastCacheUpdate < CACHE_VALIDITY_MS;
 }
 
 function invalidateCache(): void {
+  const cacheSize = nodeCache.boundingBox.size + nodeCache.visualNodeCheck.size + 
+                   nodeCache.layoutableChildren.size + nodeCache.sectionSettings.size;
+  
+  console.log(`[PERF] 캐시 무효화: ${cacheSize}개 항목, 히트율: ${Math.round(nodeCache.hitCount / (nodeCache.hitCount + nodeCache.missCount) * 100)}%`);
+  
   nodeCache.boundingBox.clear();
   nodeCache.visualNodeCheck.clear();
   nodeCache.layoutableChildren.clear();
+  nodeCache.sectionSettings.clear();
+  nodeCache.nodeHash.clear();
   nodeCache.lastCacheUpdate = Date.now();
+  nodeCache.hitCount = 0;
+  nodeCache.missCount = 0;
+}
+
+// 🔥 초고속 노드 해시 생성 (변경 감지용)
+function getNodeHash(node: SceneNode): string {
+  // 노드의 핵심 속성만으로 빠른 해시 생성
+  return `${node.id}_${node.visible}_${node.x}_${node.y}_${node.width}_${node.height}_${node.type}`;
+}
+
+// 🔥 섹션 상태 해시 생성 (설정 변경 감지용)
+function getSectionStateHash(section: SectionNode | FrameNode, settings: SectionSettings): string {
+  const childrenHash = section.children.map(child => getNodeHash(child)).join('|');
+  const settingsHash = `${settings.direction}_${settings.spacing}_${JSON.stringify(settings.margins)}`;
+  return `${section.id}_${settingsHash}_${childrenHash}`;
 }
 
 // 시각적 노드 타입 리스트 (상수로 미리 정의)
@@ -70,14 +100,17 @@ const VISUAL_NODE_TYPES = new Set([
   'COMPONENT', 'INSTANCE', 'GROUP', 'BOOLEAN_OPERATION', 'LINE'
 ]);
 
-// 시각적 노드인지 확인하는 함수 (캐싱 적용)
+// 🚀 초고속 시각적 노드 검사 (캐싱 적용)
 function isVisualNode(node: SceneNode, includeText: boolean = false): node is VisualNode {
   const cacheKey = `${node.id}_${includeText}`;
   
   // 캐시에서 확인
   if (isCacheValid() && nodeCache.visualNodeCheck.has(cacheKey)) {
+    nodeCache.hitCount++;
     return nodeCache.visualNodeCheck.get(cacheKey)!;
   }
+  
+  nodeCache.missCount++;
   
   // 새로운 계산
   let isVisual = VISUAL_NODE_TYPES.has(node.type);
@@ -90,29 +123,37 @@ function isVisualNode(node: SceneNode, includeText: boolean = false): node is Vi
   return isVisual;
 }
 
-// 레이아웃 가능한 자식 노드들을 필터링하는 함수 (최적화)
+// 🚀 초고속 레이아웃 가능한 자식 노드 필터링 (스마트 캐싱)
 function getLayoutableChildren(section: SectionNode | FrameNode, settings?: SectionSettings): VisualNode[] {
+  const startTime = Date.now();
+  
   const includeText = settings?.includeText ?? false;
-  const cacheKey = `${section.id}_${includeText}`;
+  const cacheKey = `${section.id}_${includeText}_${section.children.length}`;
   
   // 캐시에서 확인
   if (isCacheValid() && nodeCache.layoutableChildren.has(cacheKey)) {
-    return nodeCache.layoutableChildren.get(cacheKey)!;
+    nodeCache.hitCount++;
+    const cached = nodeCache.layoutableChildren.get(cacheKey)!;
+    const duration = Date.now() - startTime;
+    recordPerformance('getLayoutableChildren', duration);
+    return cached;
   }
   
-  // 성능 최적화: for 루프 사용, 미리 필터링
+  nodeCache.missCount++;
+  
+  // 🔥 초고속 필터링: 불필요한 검사 최소화
   const layoutableNodes: VisualNode[] = [];
   const children = section.children;
   
+  // 미리 할당된 배열로 성능 향상
   for (let i = 0; i < children.length; i++) {
     const child = children[i];
     
-    // 빠른 사전 필터링: 보이지 않는 노드는 바로 제외
-    if (!child.visible || !child.absoluteBoundingBox) {
-      continue;
-    }
+    // 1단계: 최우선 필터링 (가장 빠른 검사부터)
+    if (!child.visible) continue;
+    if (!child.absoluteBoundingBox) continue;
     
-    // 시각적 노드 검사
+    // 2단계: 타입 검사 (캐시된 결과 활용)
     if (isVisualNode(child, includeText)) {
       layoutableNodes.push(child as VisualNode);
     }
@@ -121,21 +162,64 @@ function getLayoutableChildren(section: SectionNode | FrameNode, settings?: Sect
   // 캐시에 저장
   nodeCache.layoutableChildren.set(cacheKey, layoutableNodes);
   
-  // 🧪 DEBUG: 성능 정보 로깅 (간소화)
-  if (layoutableNodes.length > 20) {
-    console.log(`[PERF] 대용량 섹션 처리: "${section.name}" - ${layoutableNodes.length}개 노드`);
+  // 🧪 성능 로깅
+  const duration = Date.now() - startTime;
+  recordPerformance('getLayoutableChildren', duration);
+  
+  if (layoutableNodes.length > 50) {
+    console.log(`[PERF] 대용량 섹션 처리: "${section.name}" - ${layoutableNodes.length}개 노드, ${duration}ms`);
   }
   
   return layoutableNodes;
 }
 
+// 🚀 고급 성능 측정 시스템
+interface PerformanceMetrics {
+  checkAllAutoSections: number[];
+  autoResizeSection: number[];
+  getLayoutableChildren: number[];
+  layoutCalculations: number[];
+}
+
+const performanceMetrics: PerformanceMetrics = {
+  checkAllAutoSections: [],
+  autoResizeSection: [],
+  getLayoutableChildren: [],
+  layoutCalculations: []
+};
+
+function recordPerformance(metric: keyof PerformanceMetrics, time: number) {
+  performanceMetrics[metric].push(time);
+  
+  // 최근 10회 기록만 유지
+  if (performanceMetrics[metric].length > 10) {
+    performanceMetrics[metric].shift();
+  }
+  
+  // 성능 경고 시스템
+  const avg = performanceMetrics[metric].reduce((a, b) => a + b, 0) / performanceMetrics[metric].length;
+  if (avg > 100) { // 100ms 초과 시 경고
+    console.warn(`[PERF] 성능 경고: ${metric} 평균 ${Math.round(avg)}ms`);
+  }
+}
+
 // 자동 리사이징을 위한 변수들
 let autoResizeEnabled = false;
-let trackedSections = new Map<string, { frameCount: number; settings: SectionSettings }>(); // 섹션 ID -> 정보
+let trackedSections = new Map<string, { 
+  frameCount: number; 
+  settings: SectionSettings;
+  lastHash: string; // 🔥 해시 기반 변경 감지
+  lastUpdate: number; // 마지막 업데이트 시간
+}>(); 
 let debounceTimer: number | null = null;
 let throttleTimer: number | null = null;
 let monitoringInterval: number | null = null;
 let currentSettings: SectionSettings = { ...DEFAULT_SETTINGS };
+
+// 🚀 이벤트 통합 시스템 (중복 실행 방지)
+let pendingChecks = new Set<string>();
+let lastCheckTime = 0;
+const MIN_CHECK_INTERVAL = 150; // 최소 150ms 간격
 
 // 성능 최적화된 디바운스 함수
 function debounce(func: Function, delay: number) {
@@ -528,7 +612,9 @@ function createSection(settings: SectionSettings): void {
     // 4단계: 추적 정보에 즉시 추가
     trackedSections.set(section.id, { 
       frameCount: validNodes.length, 
-      settings: { ...savedSettings } 
+      settings: { ...savedSettings },
+      lastHash: getSectionStateHash(section, savedSettings),
+      lastUpdate: Date.now()
     });
     console.log(`[DEBUG] 4단계 - 추적 정보 추가 완료`);
     
@@ -566,160 +652,86 @@ function createSection(settings: SectionSettings): void {
 }
 
 // 섹션 내 프레임이 변경되었을 때 자동 리사이징 (완전히 재작성하여 안정성 극대화)
+// 🚀 초고속 자동 리사이징 함수 (성능 최적화)
 function autoResizeSection(section: SectionNode | FrameNode, customSettings?: SectionSettings) {
+  const startTime = Date.now();
+  
   try {
-    console.log(`[DEBUG] ========== 자동 리사이징 시작: ${section.name} ==========`);
+    // 🔥 설정 캐싱으로 빠른 접근
+    const settings = customSettings || getCachedSectionSettings(section);
     
-    // 설정 완전 검증 및 보정
-    let settings: SectionSettings;
-    
-    if (customSettings) {
-      console.log(`[DEBUG] 커스텀 설정 사용:`, JSON.stringify(customSettings, null, 2));
-      settings = { ...customSettings };
-    } else {
-      console.log(`[DEBUG] 저장된 설정에서 로드`);
-      settings = getSectionSettings(section);
-      console.log(`[DEBUG] 로드된 설정:`, JSON.stringify(settings, null, 2));
-    }
-    
+    // 🔥 미리 계산된 노드 목록 사용
     const visualNodes = getLayoutableChildren(section, settings);
-    console.log(`[DEBUG] 현재 시각적 노드 수: ${visualNodes.length}`);
     
-    // 설정값 유효성 완전 검증 및 보정
-    if (!settings || typeof settings !== 'object') {
-      console.error(`[DEBUG] 잘못된 설정값, 기본값 사용`);
-      settings = { ...DEFAULT_SETTINGS };
-    }
-    
-    // 모든 필드 강제 보정
-    settings = {
-      direction: (settings.direction === 'horizontal') ? 'horizontal' : 'vertical',
-      margins: {
-        top: Math.max(0, Math.min(200, settings.margins?.top ?? 40)),
-        bottom: Math.max(0, Math.min(200, settings.margins?.bottom ?? 40)),
-        left: Math.max(0, Math.min(200, settings.margins?.left ?? 40)),
-        right: Math.max(0, Math.min(200, settings.margins?.right ?? 40))
-      },
-      spacing: Math.max(0, Math.min(200, settings.spacing ?? 48)),
-      includeText: settings.includeText ?? false
-    };
-    
-    console.log(`[DEBUG] 최종 사용할 설정:`, JSON.stringify(settings, null, 2));
-    
+    // 빈 섹션 처리 (빠른 종료)
     if (visualNodes.length === 0) {
-      // 시각적 노드가 모두 제거된 경우
-      console.log(`[DEBUG] 시각적 노드가 없음 - 최소 크기로 조정`);
-      
       const minWidth = settings.margins.left + settings.margins.right;
       const minHeight = settings.margins.top + settings.margins.bottom;
       
-      console.log(`[DEBUG] 최소 크기: ${minWidth} x ${minHeight}`);
-      
-      try {
-        section.resizeWithoutConstraints(Math.max(minWidth, 100), Math.max(minHeight, 100));
-        console.log(`[DEBUG] 최소 크기 적용 완료`);
-      } catch (resizeError) {
-        console.error(`[DEBUG] 크기 조정 실패:`, resizeError);
-      }
-      
-      // 추적에서 제거
+      section.resizeWithoutConstraints(Math.max(minWidth, 100), Math.max(minHeight, 100));
       trackedSections.delete(section.id);
-      console.log(`[DEBUG] 추적에서 제거됨`);
       
+      const duration = Date.now() - startTime;
+      recordPerformance('autoResizeSection', duration);
       return;
     }
 
-    console.log(`[DEBUG] ---------- 레이아웃 적용 시작 ----------`);
-    
-    // 이전 크기 기록
-    const beforeWidth = section.width;
-    const beforeHeight = section.height;
-    console.log(`[DEBUG] 이전 크기: ${beforeWidth} x ${beforeHeight}`);
-
-    // SECTION과 FRAME에 따라 최적화 처리
-    try {
-      if (section.type === 'SECTION') {
-        console.log(`[DEBUG] SECTION 노드 처리`);
-        
-        // 프레임들 정렬
-        arrangeSectionFrames(section as SectionNode, settings);
-        console.log(`[DEBUG] 프레임 정렬 완료`);
-        
-        // 섹션 크기 조정
-        resizeSectionToFitContent(section as SectionNode, settings);
-        console.log(`[DEBUG] 섹션 크기 조정 완료`);
-        
-      } else {
-        console.log(`[DEBUG] FRAME 노드 처리`);
-        
-        // 시각적 노드 정렬 및 크기 계산
-        const { width, height } = arrangeFrames(visualNodes, settings);
-        console.log(`[DEBUG] 계산된 새 크기: ${width} x ${height}`);
-        
-        // 크기 변경이 필요한지 확인 (1px 이상 차이)
-        const widthDiff = Math.abs(section.width - width);
-        const heightDiff = Math.abs(section.height - height);
-        
-        console.log(`[DEBUG] 크기 차이: width ${widthDiff}px, height ${heightDiff}px`);
-        
-        if (widthDiff > 1 || heightDiff > 1) {
-          console.log(`[DEBUG] 크기 변경 필요 - 적용 중...`);
-          section.resizeWithoutConstraints(Math.max(width, 100), Math.max(height, 100));
-          console.log(`[DEBUG] 크기 변경 완료: ${width} x ${height}`);
-        } else {
-          console.log(`[DEBUG] 크기 변경 불필요`);
-        }
-      }
+    // 🔥 타입별 최적화된 처리
+    if (section.type === 'SECTION') {
+      // SECTION 타입: 정렬 + 리사이징
+      arrangeSectionFrames(section as SectionNode, settings);
+      resizeSectionToFitContent(section as SectionNode, settings);
       
-    } catch (processingError) {
-      console.error(`[DEBUG] 레이아웃 처리 중 오류:`, processingError);
+    } else {
+      // FRAME 타입: 빠른 크기 계산 및 적용
+      const { width, height } = arrangeFrames(visualNodes, settings);
       
-      // 오류 격리 및 기본 처리
-      try {
-        console.log(`[DEBUG] 오류 복구 시도`);
-        if (section.type === 'SECTION') {
-          resizeSectionToFitContent(section as SectionNode, DEFAULT_SETTINGS);
-        } else {
-          const bounds = calculateSectionBounds(section);
-          section.resizeWithoutConstraints(Math.max(bounds.width, 100), Math.max(bounds.height, 100));
-        }
-        console.log(`[DEBUG] 오류 복구 성공`);
-      } catch (recoveryError) {
-        console.error(`[DEBUG] 오류 복구도 실패:`, recoveryError);
+      // 🔥 변경 감지 최적화: 임계값 이상일 때만 업데이트
+      const CHANGE_THRESHOLD = 1;
+      const widthDiff = Math.abs(section.width - width);
+      const heightDiff = Math.abs(section.height - height);
+      
+      if (widthDiff > CHANGE_THRESHOLD || heightDiff > CHANGE_THRESHOLD) {
+        section.resizeWithoutConstraints(Math.max(width, 100), Math.max(height, 100));
       }
     }
-    
-    // 이후 크기 확인
-    const afterWidth = section.width;
-    const afterHeight = section.height;
-    console.log(`[DEBUG] 이후 크기: ${afterWidth} x ${afterHeight}`);
 
-    // 추적 정보 강제 업데이트 (최신 설정으로)
+    // 🔥 추적 정보 업데이트 (해시 기반)
+    const newHash = getSectionStateHash(section, settings);
     trackedSections.set(section.id, { 
       frameCount: visualNodes.length, 
-      settings: { ...settings }
+      settings: settings,
+      lastHash: newHash,
+      lastUpdate: Date.now()
     });
-    console.log(`[DEBUG] 추적 정보 업데이트 완료`);
 
-    // 설정 정보 다시 저장 (일관성 유지)
-    try {
-      saveSectionSettings(section, settings);
-      console.log(`[DEBUG] 설정 재저장 완료`);
-    } catch (saveError) {
-      console.error(`[DEBUG] 설정 저장 실패:`, saveError);
+    // 성능 측정 기록
+    const duration = Date.now() - startTime;
+    recordPerformance('autoResizeSection', duration);
+    
+    // 성능 로깅 (임계값 초과 시만)
+    if (duration > 50) {
+      console.log(`[PERF] 리사이징 완료: "${section.name}" ${duration}ms (${visualNodes.length}개 노드)`);
     }
-
-    console.log(`[DEBUG] ========== 자동 리사이징 완료: ${section.name} ==========`);
 
   } catch (error) {
-    console.error(`[DEBUG] 자동 리사이징 중 치명적 오류:`, error);
-    console.error(`[DEBUG] 오류 섹션: ${section?.name}, 타입: ${section?.type}`);
+    console.error(`[PERF] 리사이징 오류: "${section?.name}"`, error);
     
-    // 오류 발생 시 개별 섹션만 추적에서 제거
-    if (section?.id) {
+    // 🚀 빠른 오류 복구
+    try {
+      if (section.type === 'SECTION') {
+        resizeSectionToFitContent(section as SectionNode, DEFAULT_SETTINGS);
+      } else {
+        const bounds = calculateSectionBounds(section);
+        section.resizeWithoutConstraints(Math.max(bounds.width, 100), Math.max(bounds.height, 100));
+      }
+    } catch (recoveryError) {
+      // 복구 불가능한 경우 추적에서 제거
       trackedSections.delete(section.id);
-      console.log(`[DEBUG] 오류로 인한 추적 제거: ${section.id}`);
     }
+    
+    const duration = Date.now() - startTime;
+    recordPerformance('autoResizeSection', duration);
   }
 }
 
@@ -752,151 +764,238 @@ function findAutoSections(node: BaseNode): (SectionNode | FrameNode)[] {
 }
 
 // 성능 최적화된 checkAllAutoSections 함수
+// 🚀 혁신적인 스마트 변경 감지 시스템
 function checkAllAutoSections() {
   if (!autoResizeEnabled) return;
+  
+  // 🔥 중복 실행 방지 시스템
+  const now = Date.now();
+  if (now - lastCheckTime < MIN_CHECK_INTERVAL) {
+    console.log(`[PERF] 중복 실행 방지: ${now - lastCheckTime}ms 경과 (최소 ${MIN_CHECK_INTERVAL}ms 필요)`);
+    return;
+  }
+  lastCheckTime = now;
 
+  const startTime = Date.now();
+  
   try {
-    // 🧪 DEBUG: 성능 측정 시작
-    const startTime = Date.now();
-    
     const allAutoSections = findAutoSections(figma.currentPage);
     
-    // 🧪 DEBUG: 성능 정보 로깅
-    if (allAutoSections.length > 10) {
-      console.log(`[PERF] 대용량 검사: ${allAutoSections.length}개 AutoSection 처리`);
+    // 🧪 성능 로깅
+    if (allAutoSections.length > 5) {
+      console.log(`[PERF] 검사 시작: ${allAutoSections.length}개 AutoSection`);
     }
 
-    // 성능 최적화: for 루프 사용, forEach 대신
+    let updatedCount = 0;
+    let skippedCount = 0;
+
+    // 🔥 초고속 변경 감지: 해시 기반 비교
     for (let i = 0; i < allAutoSections.length; i++) {
       const section = allAutoSections[i];
+      
       try {
-        const sectionSettings = getSectionSettings(section);
-        const currentNodeCount = getLayoutableChildren(section, sectionSettings).length;
+        const sectionSettings = getCachedSectionSettings(section);
+        const currentHash = getSectionStateHash(section, sectionSettings);
         const tracked = trackedSections.get(section.id);
         
         if (!tracked) {
-          // 새로 발견된 섹션을 추적 목록에 추가
-          const settings = getSectionSettings(section);
+          // 새로 발견된 섹션 등록
+          const nodeCount = getLayoutableChildren(section, sectionSettings).length;
           trackedSections.set(section.id, {
-            frameCount: currentNodeCount,
-            settings: settings
+            frameCount: nodeCount,
+            settings: sectionSettings,
+            lastHash: currentHash,
+            lastUpdate: now
           });
+          console.log(`[PERF] 새 섹션 등록: "${section.name}" (${nodeCount}개 노드)`);
           continue;
         }
         
-        const trackedFrameCount = tracked.frameCount;
-        const trackedSettings = tracked.settings;
-        
-        // 현재 저장된 설정 확인
-        const currentSettings = getSectionSettings(section);
-        
-        // 노드 개수 변경 감지
-        const frameCountChanged = currentNodeCount !== trackedFrameCount;
-        
-        // 설정 변경 감지 (JSON 문자열 비교로 정확한 비교)
-        const settingsChanged = JSON.stringify(trackedSettings) !== JSON.stringify(currentSettings);
-        
-        // 변경이 감지된 경우에만 리사이징 실행 (성능 최적화)
-        if (frameCountChanged || settingsChanged) {
-          // 🧪 DEBUG: 변경 감지 로깅
-          if (frameCountChanged) {
-            console.log(`[PERF] 프레임 수 변경 감지: "${section.name}" ${trackedFrameCount} → ${currentNodeCount}`);
-          }
-          if (settingsChanged) {
-            console.log(`[PERF] 설정 변경 감지: "${section.name}"`);
-          }
-          
-          // 최신 설정으로 자동 리사이징 실행
-          autoResizeSection(section, currentSettings);
-          
-          // 추적 정보 업데이트
-          trackedSections.set(section.id, {
-            frameCount: currentNodeCount,
-            settings: currentSettings
-          });
+        // 🔥 해시 기반 초고속 변경 감지
+        if (tracked.lastHash === currentHash) {
+          skippedCount++;
+          continue; // 변경 없음 - 즉시 스킵
         }
         
-      } catch (sectionError) {
-        console.error(`[PERF] 섹션 ${section.name} 처리 중 오류:`, sectionError);
+        // 변경 감지됨 - 상세 분석 실행
+        const currentNodeCount = getLayoutableChildren(section, sectionSettings).length;
+        const frameCountChanged = currentNodeCount !== tracked.frameCount;
         
-        // 오류 발생 시 해당 섹션을 추적에서 제거하지 않고 재시도
+        console.log(`[PERF] 변경 감지: "${section.name}" 해시변경=${tracked.lastHash !== currentHash}, 노드수=${frameCountChanged ? `${tracked.frameCount}→${currentNodeCount}` : '동일'}`);
+        
+        // 🚀 스마트 리사이징 (변경된 것만)
+        const resizeStartTime = Date.now();
+        autoResizeSection(section, sectionSettings);
+        const resizeDuration = Date.now() - resizeStartTime;
+        recordPerformance('autoResizeSection', resizeDuration);
+        
+        // 추적 정보 업데이트
+        trackedSections.set(section.id, {
+          frameCount: currentNodeCount,
+          settings: sectionSettings,
+          lastHash: currentHash,
+          lastUpdate: now
+        });
+        
+        updatedCount++;
+        
+      } catch (sectionError) {
+        console.error(`[PERF] 섹션 처리 오류: "${section.name}"`, sectionError);
+        
+        // 🚀 스마트 복구: 기본 설정으로 재등록
         try {
-          const settings = getSectionSettings(section);
+          const defaultSettings = { ...DEFAULT_SETTINGS };
+          const nodeCount = getLayoutableChildren(section, defaultSettings).length;
           trackedSections.set(section.id, {
-            frameCount: getLayoutableChildren(section).length,
-            settings: settings
+            frameCount: nodeCount,
+            settings: defaultSettings,
+            lastHash: getSectionStateHash(section, defaultSettings),
+            lastUpdate: now
           });
         } catch (recoveryError) {
-          console.error(`[PERF] 섹션 ${section.name} 복구 실패:`, recoveryError);
+          console.error(`[PERF] 복구 실패: "${section.name}"`, recoveryError);
           trackedSections.delete(section.id);
         }
       }
     }
     
-    // 존재하지 않는 섹션들을 추적 목록에서 제거 (성능 최적화)
-    const existingSectionIds = new Set(allAutoSections.map(s => s.id));
-    const trackedIds = Array.from(trackedSections.keys());
-    
-    for (let i = 0; i < trackedIds.length; i++) {
-      const trackedId = trackedIds[i];
-      if (!existingSectionIds.has(trackedId)) {
-        trackedSections.delete(trackedId);
-        console.log(`[PERF] 삭제된 섹션 추적 제거: ${trackedId}`);
+    // 🔥 삭제된 섹션 정리 (성능 최적화)
+    if (trackedSections.size > allAutoSections.length) {
+      const existingSectionIds = new Set(allAutoSections.map(s => s.id));
+      const toDelete: string[] = [];
+      
+      for (const trackedId of trackedSections.keys()) {
+        if (!existingSectionIds.has(trackedId)) {
+          toDelete.push(trackedId);
+        }
+      }
+      
+      for (const id of toDelete) {
+        trackedSections.delete(id);
+      }
+      
+      if (toDelete.length > 0) {
+        console.log(`[PERF] 삭제된 섹션 정리: ${toDelete.length}개`);
       }
     }
     
-    // 🧪 DEBUG: 성능 측정 완료
-    const endTime = Date.now();
-    const processingTime = endTime - startTime;
-    if (processingTime > 100) {
-      console.log(`[PERF] 성능 경고: AutoSection 체크 완료 ${processingTime}ms (${allAutoSections.length}개 섹션)`);
+    // 🧪 성능 리포트
+    const totalDuration = Date.now() - startTime;
+    recordPerformance('checkAllAutoSections', totalDuration);
+    
+    if (totalDuration > 50 || updatedCount > 0) {
+      console.log(`[PERF] 검사 완료: ${totalDuration}ms, 업데이트=${updatedCount}개, 스킵=${skippedCount}개, 전체=${allAutoSections.length}개`);
     }
     
   } catch (error) {
-    console.error(`[PERF] AutoSection 체크 중 치명적 오류:`, error);
+    console.error(`[PERF] 치명적 오류:`, error);
   }
 }
 
-// throttle이 적용된 checkAllAutoSections
-const checkAllAutoSectionsThrottled = throttle(checkAllAutoSections, 100);
+// 🚀 캐시된 섹션 설정 가져오기 (중복 호출 방지)
+function getCachedSectionSettings(section: SectionNode | FrameNode): SectionSettings {
+  const cacheKey = section.id;
+  
+  // 캐시에서 먼저 확인
+  if (isCacheValid() && nodeCache.sectionSettings.has(cacheKey)) {
+    nodeCache.hitCount++;
+    return nodeCache.sectionSettings.get(cacheKey)!;
+  }
+  
+  nodeCache.missCount++;
+  
+  // 새로 계산
+  const settings = getSectionSettings(section);
+  
+  // 캐시에 저장
+  nodeCache.sectionSettings.set(cacheKey, settings);
+  
+  return settings;
+}
 
-// 선택 변경 이벤트 리스너 추가 (성능 최적화)
-function setupSelectionChangeListener() {
+// 🚀 통합된 이벤트 처리 시스템 (중복 방지)
+const UNIFIED_CHECK_DELAY = 200; // 통합 검사 지연 시간
+let unifiedCheckTimer: number | null = null;
+
+function scheduleUnifiedCheck(reason: string) {
+  if (!autoResizeEnabled) return;
+  
+  // 기존 타이머 취소
+  if (unifiedCheckTimer) {
+    clearTimeout(unifiedCheckTimer);
+  }
+  
+  // 새로운 통합 검사 예약
+  unifiedCheckTimer = setTimeout(() => {
+    console.log(`[PERF] 통합 검사 실행: ${reason}`);
+    checkAllAutoSections();
+    unifiedCheckTimer = null;
+  }, UNIFIED_CHECK_DELAY) as any;
+}
+
+// 🚀 최적화된 이벤트 리스너 설정
+function setupOptimizedEventListeners() {
+  // 선택 변경 이벤트 (debounced)
   figma.on('selectionchange', () => {
-    if (autoResizeEnabled) {
-      // throttle 적용된 함수 사용
-      setTimeout(() => {
-        checkAllAutoSectionsThrottled();
-      }, 50);
-    }
+    scheduleUnifiedCheck('selection-change');
   });
 }
 
-// 자동 리사이징 모니터링 시작 (성능 최적화)
+// 🚀 초고속 자동 리사이징 시스템 시작
 function startAutoResizeListener() {
   autoResizeEnabled = true;
+  lastCheckTime = 0;
   
   // 캐시 무효화
   invalidateCache();
   
-  // 선택 변경 이벤트 리스너 설정
-  setupSelectionChangeListener();
+  // 최적화된 이벤트 리스너 설정
+  setupOptimizedEventListeners();
   
-  // throttle 적용된 주기적 체크 (300ms로 늘려서 성능 개선)
+  // 🔥 스마트 간격 조정: 더 긴 간격으로 CPU 부하 감소
   if (monitoringInterval) {
     clearInterval(monitoringInterval);
   }
   
+  // 500ms 간격으로 더 여유롭게 (이벤트 기반이 주가 됨)
   monitoringInterval = setInterval(() => {
-    checkAllAutoSectionsThrottled();
-  }, 300) as any;
+    scheduleUnifiedCheck('periodic-check');
+  }, 500) as any;
   
-  console.log(`[PERF] 성능 최적화된 자동 리사이징 시스템 활성화 (300ms throttle)`);
+  console.log(`[PERF] 🚀 초고속 자동 리사이징 시스템 활성화 (통합 이벤트, ${UNIFIED_CHECK_DELAY}ms 지연)`);
+  
+  // 🧪 성능 통계 주기적 리포트 (30초마다)
+  setInterval(() => {
+    printPerformanceStats();
+  }, 30000);
   
   figma.ui.postMessage({
     type: 'info',
-    message: '자동 리사이징 모드가 활성화되었습니다.'
+    message: '🚀 고성능 자동 리사이징 모드가 활성화되었습니다.'
   });
+}
+
+// 🧪 성능 통계 출력 함수
+function printPerformanceStats() {
+  const cacheHitRate = nodeCache.hitCount + nodeCache.missCount > 0 
+    ? Math.round((nodeCache.hitCount / (nodeCache.hitCount + nodeCache.missCount)) * 100) 
+    : 0;
+  
+  console.log(`[PERF] === 성능 통계 ===`);
+  console.log(`캐시 히트율: ${cacheHitRate}% (히트: ${nodeCache.hitCount}, 미스: ${nodeCache.missCount})`);
+  console.log(`추적 중인 섹션: ${trackedSections.size}개`);
+  
+  // 각 함수별 평균 실행 시간
+  const metricNames: (keyof PerformanceMetrics)[] = ['checkAllAutoSections', 'autoResizeSection', 'getLayoutableChildren', 'layoutCalculations'];
+  
+  for (const metric of metricNames) {
+    const times = performanceMetrics[metric];
+    if (times.length > 0) {
+      const avg = Math.round(times.reduce((a: number, b: number) => a + b, 0) / times.length);
+      const max = Math.round(Math.max(...times));
+      console.log(`${metric}: 평균 ${avg}ms, 최대 ${max}ms (${times.length}회)`);
+    }
+  }
 }
 
 // 자동 리사이징 중지 (성능 최적화)
@@ -1029,11 +1128,9 @@ figma.on('selectionchange', () => {
   console.log(`[DEBUG] 선택 변경 이벤트`);
   debouncedCheckSelectionInfo();
   
-  // 자동 리사이징이 활성화된 경우 변경사항 체크 (throttle 적용)
+  // 자동 리사이징이 활성화된 경우 변경사항 체크 (통합 시스템 사용)
   if (autoResizeEnabled) {
-    setTimeout(() => {
-      checkAllAutoSectionsThrottled();
-    }, 100);
+    scheduleUnifiedCheck('legacy-selection-change');
   }
 });
 
@@ -1069,10 +1166,8 @@ function setupDocumentChangeListener() {
         }
         
         if (needsCheck) {
-          console.log(`[PERF] AutoSection 변경사항으로 인한 체크 실행 (throttle)`);
-          setTimeout(() => {
-            checkAllAutoSectionsThrottled();
-          }, 200); // 변경 완료 후 체크
+          console.log(`[PERF] AutoSection 변경사항으로 인한 체크 실행 (통합 시스템)`);
+          scheduleUnifiedCheck('document-change');
         }
         
       } catch (error) {
@@ -1108,7 +1203,9 @@ async function initializePlugin() {
         
         trackedSections.set(section.id, {
           frameCount: visualNodes.length,
-          settings: settings
+          settings: settings,
+          lastHash: getSectionStateHash(section, settings),
+          lastUpdate: Date.now()
         });
         
         console.log(`기존 섹션 추적 시작: ${section.name}, ${visualNodes.length}개 시각적 노드`);
@@ -1550,7 +1647,9 @@ function updateSectionLayout(section: FrameNode | SectionNode, newSettings?: Sec
     // 7단계: 추적 정보 업데이트
     trackedSections.set(section.id, { 
       frameCount: visualNodes.length, 
-      settings: { ...finalSettings } 
+      settings: { ...finalSettings },
+      lastHash: getSectionStateHash(section, finalSettings),
+      lastUpdate: Date.now()
     });
     console.log(`[LAYOUT] 7단계 - 추적 정보 업데이트 완료`);
     
@@ -1738,7 +1837,9 @@ function updateSelectedSectionSettings(newSettings: SectionSettings): void {
     const visualNodes = getLayoutableChildren(section);
     trackedSections.set(section.id, {
       frameCount: visualNodes.length,
-      settings: { ...validatedSettings }
+      settings: { ...validatedSettings },
+      lastHash: getSectionStateHash(section, validatedSettings),
+      lastUpdate: Date.now()
     });
     console.log(`[SETTING] 추적 정보 업데이트 완료: ${visualNodes.length}개 시각적 노드`);
     
