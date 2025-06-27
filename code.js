@@ -24,61 +24,103 @@ const DEFAULT_SETTINGS = {
     spacing: 48,
     includeText: false // 기본적으로 TextNode 제외
 };
-// 시각적 노드인지 확인하는 함수 (설정에 따라 TextNode 포함/제외)
-function isVisualNode(node, includeText = false) {
-    // 🧪 DEBUG: 노드 타입 로깅
-    console.log(`[DEBUG] isVisualNode 검사: 노드 타입 = ${node.type}, 이름 = "${node.name}", includeText = ${includeText}, visible = ${node.visible}`);
-    const visualNodeTypes = [
-        'FRAME', 'RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR',
-        'COMPONENT', 'INSTANCE', 'GROUP', 'BOOLEAN_OPERATION', 'LINE'
-    ];
-    // TextNode 포함 여부에 따라 추가
-    if (includeText) {
-        visualNodeTypes.push('TEXT');
-    }
-    // includes 대신 직접 검사
-    for (let i = 0; i < visualNodeTypes.length; i++) {
-        if (node.type === visualNodeTypes[i]) {
-            console.log(`[DEBUG] ✅ 시각적 노드로 인식됨: ${node.type}`);
-            return true;
-        }
-    }
-    console.log(`[DEBUG] ❌ 시각적 노드가 아님: ${node.type}`);
-    return false;
+const nodeCache = {
+    boundingBox: new Map(),
+    visualNodeCheck: new Map(),
+    layoutableChildren: new Map(),
+    lastCacheUpdate: 0
+};
+// 캐시 유효성 검사 (5초 후 무효화)
+const CACHE_VALIDITY_MS = 5000;
+function isCacheValid() {
+    return Date.now() - nodeCache.lastCacheUpdate < CACHE_VALIDITY_MS;
 }
-// 레이아웃 가능한 자식 노드들을 필터링하는 함수
+function invalidateCache() {
+    nodeCache.boundingBox.clear();
+    nodeCache.visualNodeCheck.clear();
+    nodeCache.layoutableChildren.clear();
+    nodeCache.lastCacheUpdate = Date.now();
+}
+// 시각적 노드 타입 리스트 (상수로 미리 정의)
+const VISUAL_NODE_TYPES = new Set([
+    'FRAME', 'RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR',
+    'COMPONENT', 'INSTANCE', 'GROUP', 'BOOLEAN_OPERATION', 'LINE'
+]);
+// 시각적 노드인지 확인하는 함수 (캐싱 적용)
+function isVisualNode(node, includeText = false) {
+    const cacheKey = `${node.id}_${includeText}`;
+    // 캐시에서 확인
+    if (isCacheValid() && nodeCache.visualNodeCheck.has(cacheKey)) {
+        return nodeCache.visualNodeCheck.get(cacheKey);
+    }
+    // 새로운 계산
+    let isVisual = VISUAL_NODE_TYPES.has(node.type);
+    if (includeText && node.type === 'TEXT') {
+        isVisual = true;
+    }
+    // 캐시에 저장
+    nodeCache.visualNodeCheck.set(cacheKey, isVisual);
+    return isVisual;
+}
+// 레이아웃 가능한 자식 노드들을 필터링하는 함수 (최적화)
 function getLayoutableChildren(section, settings) {
     var _a;
     const includeText = (_a = settings === null || settings === void 0 ? void 0 : settings.includeText) !== null && _a !== void 0 ? _a : false;
-    // 🧪 DEBUG: 자식 노드 정보 출력
-    console.log(`[DEBUG] getLayoutableChildren - 섹션: "${section.name}", 자식 노드 수: ${section.children.length}, includeText: ${includeText}`);
-    section.children.forEach((child, index) => {
-        console.log(`[DEBUG] 자식 노드 ${index + 1}: 타입=${child.type}, 이름="${child.name}", visible=${child.visible}, boundingBox=${!!child.absoluteBoundingBox}`);
-    });
-    const layoutableNodes = section.children.filter(child => {
-        // 시각적 노드이고 보이는 노드만 포함
-        const isVisual = isVisualNode(child, includeText);
-        const isVisible = child.visible;
-        const hasBounds = !!child.absoluteBoundingBox;
-        console.log(`[DEBUG] 자식 노드 "${child.name}" 검사: isVisual=${isVisual}, isVisible=${isVisible}, hasBounds=${hasBounds}`);
-        return isVisual && isVisible && hasBounds;
-    });
-    console.log(`[DEBUG] 최종 레이아웃 가능한 노드 수: ${layoutableNodes.length}`);
+    const cacheKey = `${section.id}_${includeText}`;
+    // 캐시에서 확인
+    if (isCacheValid() && nodeCache.layoutableChildren.has(cacheKey)) {
+        return nodeCache.layoutableChildren.get(cacheKey);
+    }
+    // 성능 최적화: for 루프 사용, 미리 필터링
+    const layoutableNodes = [];
+    const children = section.children;
+    for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        // 빠른 사전 필터링: 보이지 않는 노드는 바로 제외
+        if (!child.visible || !child.absoluteBoundingBox) {
+            continue;
+        }
+        // 시각적 노드 검사
+        if (isVisualNode(child, includeText)) {
+            layoutableNodes.push(child);
+        }
+    }
+    // 캐시에 저장
+    nodeCache.layoutableChildren.set(cacheKey, layoutableNodes);
+    // 🧪 DEBUG: 성능 정보 로깅 (간소화)
+    if (layoutableNodes.length > 20) {
+        console.log(`[PERF] 대용량 섹션 처리: "${section.name}" - ${layoutableNodes.length}개 노드`);
+    }
     return layoutableNodes;
 }
 // 자동 리사이징을 위한 변수들
 let autoResizeEnabled = false;
 let trackedSections = new Map(); // 섹션 ID -> 정보
 let debounceTimer = null;
+let throttleTimer = null;
 let monitoringInterval = null;
 let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
-// 디바운스 함수 (성능 최적화)
+// 성능 최적화된 디바운스 함수
 function debounce(func, delay) {
     return (...args) => {
         if (debounceTimer) {
             clearTimeout(debounceTimer);
         }
-        debounceTimer = setTimeout(() => func.apply(null, args), delay);
+        debounceTimer = setTimeout(() => {
+            func.apply(null, args);
+            debounceTimer = null;
+        }, delay);
+    };
+}
+// 스로틀 함수 추가 (이벤트 빈도 제한)
+function throttle(func, limit) {
+    return (...args) => {
+        if (!throttleTimer) {
+            func.apply(null, args);
+            throttleTimer = setTimeout(() => {
+                throttleTimer = null;
+            }, limit);
+        }
     };
 }
 function arrangeFrames(input, settings) {
@@ -86,44 +128,66 @@ function arrangeFrames(input, settings) {
     if (input instanceof Array === false) {
         const section = input;
         const visualNodes = getLayoutableChildren(section, settings);
-        const result = arrangeFramesInternal(visualNodes, settings);
+        if (visualNodes.length === 0)
+            return;
+        arrangeFramesInternal(visualNodes, settings);
         return; // void 반환
     }
     // 노드 배열인 경우 정렬하고 크기 정보 반환
     const nodes = input;
     return arrangeFramesInternal(nodes, settings);
 }
-// SECTION 노드용 시각적 노드 정렬 함수
+// SECTION 노드용 시각적 노드 정렬 함수 (성능 최적화)
 function arrangeSectionFrames(section, settings) {
     const visualNodes = getLayoutableChildren(section, settings);
     if (visualNodes.length === 0)
         return;
+    // 성능 최적화: 변경 사항이 있는지 미리 확인
+    let needsUpdate = false;
     if (settings.direction === 'vertical') {
-        // 세로 정렬
+        // 세로 정렬 - 성능 최적화된 정렬
         visualNodes.sort((a, b) => a.y - b.y);
         let currentY = settings.margins.top;
-        visualNodes.forEach((node, index) => {
-            node.x = settings.margins.left;
-            node.y = currentY;
-            if (index < visualNodes.length - 1) {
+        for (let i = 0; i < visualNodes.length; i++) {
+            const node = visualNodes[i];
+            const newX = settings.margins.left;
+            const newY = currentY;
+            // 위치 변경이 필요한 경우에만 업데이트
+            if (Math.abs(node.x - newX) > 0.1 || Math.abs(node.y - newY) > 0.1) {
+                node.x = newX;
+                node.y = newY;
+                needsUpdate = true;
+            }
+            if (i < visualNodes.length - 1) {
                 currentY += node.height + settings.spacing;
             }
-        });
+        }
     }
     else {
-        // 가로 정렬
+        // 가로 정렬 - 성능 최적화된 정렬
         visualNodes.sort((a, b) => a.x - b.x);
         let currentX = settings.margins.left;
-        visualNodes.forEach((node, index) => {
-            node.x = currentX;
-            node.y = settings.margins.top;
-            if (index < visualNodes.length - 1) {
+        for (let i = 0; i < visualNodes.length; i++) {
+            const node = visualNodes[i];
+            const newX = currentX;
+            const newY = settings.margins.top;
+            // 위치 변경이 필요한 경우에만 업데이트
+            if (Math.abs(node.x - newX) > 0.1 || Math.abs(node.y - newY) > 0.1) {
+                node.x = newX;
+                node.y = newY;
+                needsUpdate = true;
+            }
+            if (i < visualNodes.length - 1) {
                 currentX += node.width + settings.spacing;
             }
-        });
+        }
+    }
+    // 🧪 DEBUG: 성능 정보
+    if (needsUpdate && visualNodes.length > 10) {
+        console.log(`[PERF] 레이아웃 업데이트: ${visualNodes.length}개 노드 정렬 완료`);
     }
 }
-// 실제 정렬 로직
+// 실제 정렬 로직 (성능 최적화)
 function arrangeFramesInternal(nodes, settings) {
     if (nodes.length === 0)
         return { width: 0, height: 0 };
@@ -132,102 +196,120 @@ function arrangeFramesInternal(nodes, settings) {
     let maxWidth = 0;
     let maxHeight = 0;
     if (settings.direction === 'vertical') {
-        // 세로 정렬
+        // 세로 정렬 - for 루프로 최적화
         nodes.sort((a, b) => a.y - b.y);
         let currentY = settings.margins.top;
-        nodes.forEach((node, index) => {
+        for (let i = 0; i < nodes.length; i++) {
+            const node = nodes[i];
             maxWidth = Math.max(maxWidth, node.width);
             node.x = settings.margins.left;
             node.y = currentY;
-            if (index < nodes.length - 1) {
+            if (i < nodes.length - 1) {
                 currentY += node.height + settings.spacing;
             }
             else {
                 currentY += node.height;
             }
-        });
+        }
         totalWidth = maxWidth + settings.margins.left + settings.margins.right;
         totalHeight = currentY + settings.margins.bottom;
     }
     else {
-        // 가로 정렬
+        // 가로 정렬 - for 루프로 최적화
         nodes.sort((a, b) => a.x - b.x);
         let currentX = settings.margins.left;
-        nodes.forEach((node, index) => {
+        for (let i = 0; i < nodes.length; i++) {
+            const node = nodes[i];
             maxHeight = Math.max(maxHeight, node.height);
             node.x = currentX;
             node.y = settings.margins.top;
-            if (index < nodes.length - 1) {
+            if (i < nodes.length - 1) {
                 currentX += node.width + settings.spacing;
             }
             else {
                 currentX += node.width;
             }
-        });
+        }
         totalWidth = currentX + settings.margins.right;
         totalHeight = maxHeight + settings.margins.top + settings.margins.bottom;
     }
     return { width: totalWidth, height: totalHeight };
 }
-// 프레임들의 경계 계산
+// 캐싱된 boundingBox 계산 함수
 function calculateBounds(frames) {
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    frames.forEach(frame => {
-        minX = Math.min(minX, frame.x);
-        minY = Math.min(minY, frame.y);
-        maxX = Math.max(maxX, frame.x + frame.width);
-        maxY = Math.max(maxY, frame.y + frame.height);
-    });
-    return {
-        x: minX,
-        y: minY,
-        width: maxX - minX,
-        height: maxY - minY
-    };
-}
-// 섹션 내부 시각적 노드들의 경계 계산 (여백 포함)
-function calculateSectionBounds(section, settings) {
-    const visualNodes = getLayoutableChildren(section, settings);
-    if (visualNodes.length === 0)
-        return { width: 100, height: 100 };
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    visualNodes.forEach(node => {
-        minX = Math.min(minX, node.x);
-        minY = Math.min(minY, node.y);
-        maxX = Math.max(maxX, node.x + node.width);
-        maxY = Math.max(maxY, node.y + node.height);
-    });
-    // 기본값을 넣어 안전하게 처리
-    const defaultMargin = 40;
-    return {
-        width: Math.max(maxX + defaultMargin, 100),
-        height: Math.max(maxY + defaultMargin, 100)
-    };
-}
-// SECTION 노드용 크기 조정 함수
-function resizeSectionToFitContent(section, settings) {
-    const visualNodes = getLayoutableChildren(section, settings);
-    if (visualNodes.length === 0) {
-        // 시각적 노드가 없으면 최소 크기로 설정
-        section.resizeWithoutConstraints(settings.margins.left + settings.margins.right, settings.margins.top + settings.margins.bottom);
-        return;
+    if (frames.length === 0) {
+        return { x: 0, y: 0, width: 0, height: 0 };
     }
-    let maxX = 0;
-    let maxY = 0;
-    visualNodes.forEach(node => {
-        maxX = Math.max(maxX, node.x + node.width);
-        maxY = Math.max(maxY, node.y + node.height);
-    });
-    // 여백을 포함한 최종 크기 계산
-    const finalWidth = maxX + settings.margins.right;
-    const finalHeight = maxY + settings.margins.bottom;
-    section.resizeWithoutConstraints(finalWidth, finalHeight);
+    // 캐시 키 생성
+    const cacheKey = frames.map(f => f.id).sort().join('_');
+    // 캐시에서 확인
+    if (isCacheValid() && nodeCache.boundingBox.has(cacheKey)) {
+        const cached = nodeCache.boundingBox.get(cacheKey);
+        if (cached)
+            return cached;
+    }
+    // 새로운 계산 - for 루프로 최적화
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < frames.length; i++) {
+        const frame = frames[i];
+        if (!frame.absoluteBoundingBox)
+            continue;
+        const bounds = frame.absoluteBoundingBox;
+        minX = Math.min(minX, bounds.x);
+        minY = Math.min(minY, bounds.y);
+        maxX = Math.max(maxX, bounds.x + bounds.width);
+        maxY = Math.max(maxY, bounds.y + bounds.height);
+    }
+    const result = {
+        x: minX === Infinity ? 0 : minX,
+        y: minY === Infinity ? 0 : minY,
+        width: maxX === -Infinity ? 0 : maxX - minX,
+        height: maxY === -Infinity ? 0 : maxY - minY
+    };
+    // 캐시에 저장
+    nodeCache.boundingBox.set(cacheKey, result);
+    return result;
+}
+// 섹션 크기 계산 함수 (캐싱 적용)
+function calculateSectionBounds(section, settings) {
+    const cacheKey = `section_${section.id}_${JSON.stringify(settings)}`;
+    // 캐시에서 확인
+    if (isCacheValid() && nodeCache.boundingBox.has(cacheKey)) {
+        const cached = nodeCache.boundingBox.get(cacheKey);
+        if (cached)
+            return { width: cached.width, height: cached.height };
+    }
+    const sectionSettings = settings || getSectionSettings(section);
+    const visualNodes = getLayoutableChildren(section, sectionSettings);
+    if (visualNodes.length === 0) {
+        const result = { width: 100, height: 100 };
+        nodeCache.boundingBox.set(cacheKey, Object.assign({ x: 0, y: 0 }, result));
+        return result;
+    }
+    const result = arrangeFrames(visualNodes, sectionSettings);
+    // 캐시에 저장
+    nodeCache.boundingBox.set(cacheKey, Object.assign({ x: 0, y: 0 }, result));
+    return result;
+}
+// 섹션을 콘텐츠에 맞게 리사이징 (성능 최적화)
+function resizeSectionToFitContent(section, settings) {
+    try {
+        const bounds = calculateSectionBounds(section, settings);
+        // 크기 변경이 필요한 경우에만 업데이트
+        const threshold = 0.1;
+        if (Math.abs(section.width - bounds.width) > threshold ||
+            Math.abs(section.height - bounds.height) > threshold) {
+            section.resizeWithoutConstraints(bounds.width, bounds.height);
+            // 🧪 DEBUG: 리사이징 정보
+            console.log(`[PERF] 섹션 리사이징: "${section.name}" ${bounds.width}x${bounds.height}`);
+        }
+    }
+    catch (error) {
+        console.error('[ERROR] 섹션 리사이징 실패:', error);
+    }
 }
 // 섹션 생성 함수 (안정성 강화)
 function createSection(settings) {
@@ -511,155 +593,159 @@ function autoResizeSection(section, customSettings) {
         }
     }
 }
-// 모든 AutoSection 체크 (설정 변경 감지 강화)
+// 성능 최적화된 AutoSection 검색 함수
+function findAutoSections(node) {
+    const sections = [];
+    // 빠른 사전 필터링: AutoSection_로 시작하지 않는 노드는 자식만 탐색
+    if (!node.name.startsWith('AutoSection_')) {
+        if ('children' in node) {
+            for (let i = 0; i < node.children.length; i++) {
+                sections.push(...findAutoSections(node.children[i]));
+            }
+        }
+        return sections;
+    }
+    // AutoSection_로 시작하는 노드만 타입 검사
+    if (node.type === 'SECTION' || node.type === 'FRAME') {
+        sections.push(node);
+    }
+    if ('children' in node) {
+        for (let i = 0; i < node.children.length; i++) {
+            sections.push(...findAutoSections(node.children[i]));
+        }
+    }
+    return sections;
+}
+// 성능 최적화된 checkAllAutoSections 함수
 function checkAllAutoSections() {
     if (!autoResizeEnabled)
         return;
     try {
-        console.log(`[DEBUG] ========== 모든 AutoSection 체크 시작 ==========`);
-        // 현재 페이지의 모든 노드를 순회하여 AutoSection 찾기
-        function findAutoSections(node) {
-            const sections = [];
-            // SECTION 노드 또는 AutoSection_ 프레임 찾기
-            if ((node.type === 'SECTION' && node.name.startsWith('AutoSection_')) ||
-                (node.type === 'FRAME' && node.name.startsWith('AutoSection_'))) {
-                sections.push(node);
-            }
-            if ('children' in node) {
-                for (const child of node.children) {
-                    sections.push(...findAutoSections(child));
-                }
-            }
-            return sections;
-        }
+        // 🧪 DEBUG: 성능 측정 시작
+        const startTime = Date.now();
         const allAutoSections = findAutoSections(figma.currentPage);
-        console.log(`[DEBUG] 찾은 AutoSection 수: ${allAutoSections.length}`);
-        allAutoSections.forEach((section, index) => {
+        // 🧪 DEBUG: 성능 정보 로깅
+        if (allAutoSections.length > 10) {
+            console.log(`[PERF] 대용량 검사: ${allAutoSections.length}개 AutoSection 처리`);
+        }
+        // 성능 최적화: for 루프 사용, forEach 대신
+        for (let i = 0; i < allAutoSections.length; i++) {
+            const section = allAutoSections[i];
             try {
-                console.log(`[DEBUG] ---------- 섹션 ${index + 1}/${allAutoSections.length}: ${section.name} ----------`);
                 const sectionSettings = getSectionSettings(section);
                 const currentNodeCount = getLayoutableChildren(section, sectionSettings).length;
                 const tracked = trackedSections.get(section.id);
-                console.log(`[DEBUG] 현재 노드 수: ${currentNodeCount}`);
                 if (!tracked) {
-                    console.log(`[DEBUG] 추적되지 않은 섹션 - 새로 추가`);
                     // 새로 발견된 섹션을 추적 목록에 추가
                     const settings = getSectionSettings(section);
                     trackedSections.set(section.id, {
                         frameCount: currentNodeCount,
                         settings: settings
                     });
-                    console.log(`[DEBUG] 새 섹션 추적 시작: ${section.name}`);
-                    return; // continue 대신 return 사용
+                    continue;
                 }
                 const trackedFrameCount = tracked.frameCount;
                 const trackedSettings = tracked.settings;
-                console.log(`[DEBUG] 추적된 프레임 수: ${trackedFrameCount}`);
-                console.log(`[DEBUG] 추적된 설정:`, JSON.stringify(trackedSettings, null, 2));
                 // 현재 저장된 설정 확인
                 const currentSettings = getSectionSettings(section);
-                console.log(`[DEBUG] 현재 저장된 설정:`, JSON.stringify(currentSettings, null, 2));
                 // 노드 개수 변경 감지
                 const frameCountChanged = currentNodeCount !== trackedFrameCount;
                 // 설정 변경 감지 (JSON 문자열 비교로 정확한 비교)
                 const settingsChanged = JSON.stringify(trackedSettings) !== JSON.stringify(currentSettings);
-                console.log(`[DEBUG] 변경 감지 결과:`);
-                console.log(`  - 노드 수 변경: ${frameCountChanged} (${trackedFrameCount} → ${currentNodeCount})`);
-                console.log(`  - 설정 변경: ${settingsChanged}`);
-                // 변경이 감지되거나 강제 레이아웃 업데이트 필요한 경우
+                // 변경이 감지된 경우에만 리사이징 실행 (성능 최적화)
                 if (frameCountChanged || settingsChanged) {
-                    console.log(`[DEBUG] 변경 감지 - 자동 리사이징 실행`);
+                    // 🧪 DEBUG: 변경 감지 로깅
                     if (frameCountChanged) {
-                        console.log(`[DEBUG] 프레임 수 변경으로 인한 리사이징`);
+                        console.log(`[PERF] 프레임 수 변경 감지: "${section.name}" ${trackedFrameCount} → ${currentNodeCount}`);
                     }
                     if (settingsChanged) {
-                        console.log(`[DEBUG] 설정 변경으로 인한 리사이징`);
-                        console.log(`[DEBUG] 이전 설정:`, JSON.stringify(trackedSettings, null, 2));
-                        console.log(`[DEBUG] 새 설정:`, JSON.stringify(currentSettings, null, 2));
+                        console.log(`[PERF] 설정 변경 감지: "${section.name}"`);
                     }
                     // 최신 설정으로 자동 리사이징 실행
                     autoResizeSection(section, currentSettings);
-                }
-                else {
-                    // 변경이 없어도 주기적으로 강제 레이아웃 업데이트 (일관성 유지)
-                    if (Math.random() < 0.1) { // 10% 확률로 강제 업데이트
-                        console.log(`[DEBUG] 주기적 강제 레이아웃 업데이트`);
-                        autoResizeSection(section, currentSettings);
-                    }
-                    else {
-                        console.log(`[DEBUG] 변경 없음 - 건너뜀`);
-                    }
+                    // 추적 정보 업데이트
+                    trackedSections.set(section.id, {
+                        frameCount: currentNodeCount,
+                        settings: currentSettings
+                    });
                 }
             }
             catch (sectionError) {
-                console.error(`[DEBUG] 섹션 ${section.name} 처리 중 오류:`, sectionError);
+                console.error(`[PERF] 섹션 ${section.name} 처리 중 오류:`, sectionError);
                 // 오류 발생 시 해당 섹션을 추적에서 제거하지 않고 재시도
-                console.log(`[DEBUG] 섹션 ${section.name} 오류 복구 시도`);
                 try {
                     const settings = getSectionSettings(section);
                     trackedSections.set(section.id, {
                         frameCount: getLayoutableChildren(section).length,
                         settings: settings
                     });
-                    console.log(`[DEBUG] 섹션 ${section.name} 복구 성공`);
                 }
                 catch (recoveryError) {
-                    console.error(`[DEBUG] 섹션 ${section.name} 복구 실패:`, recoveryError);
+                    console.error(`[PERF] 섹션 ${section.name} 복구 실패:`, recoveryError);
                     trackedSections.delete(section.id);
                 }
             }
-        });
-        // 존재하지 않는 섹션들을 추적 목록에서 제거
+        }
+        // 존재하지 않는 섹션들을 추적 목록에서 제거 (성능 최적화)
         const existingSectionIds = new Set(allAutoSections.map(s => s.id));
         const trackedIds = Array.from(trackedSections.keys());
-        trackedIds.forEach(trackedId => {
+        for (let i = 0; i < trackedIds.length; i++) {
+            const trackedId = trackedIds[i];
             if (!existingSectionIds.has(trackedId)) {
                 trackedSections.delete(trackedId);
-                console.log(`[DEBUG] 삭제된 섹션 추적 제거: ${trackedId}`);
+                console.log(`[PERF] 삭제된 섹션 추적 제거: ${trackedId}`);
             }
-        });
-        console.log(`[DEBUG] ========== 모든 AutoSection 체크 완료 ==========`);
+        }
+        // 🧪 DEBUG: 성능 측정 완료
+        const endTime = Date.now();
+        const processingTime = endTime - startTime;
+        if (processingTime > 100) {
+            console.log(`[PERF] 성능 경고: AutoSection 체크 완료 ${processingTime}ms (${allAutoSections.length}개 섹션)`);
+        }
     }
     catch (error) {
-        console.error(`[DEBUG] AutoSection 체크 중 치명적 오류:`, error);
+        console.error(`[PERF] AutoSection 체크 중 치명적 오류:`, error);
     }
 }
-// 선택 변경 이벤트 리스너 추가
+// throttle이 적용된 checkAllAutoSections
+const checkAllAutoSectionsThrottled = throttle(checkAllAutoSections, 100);
+// 선택 변경 이벤트 리스너 추가 (성능 최적화)
 function setupSelectionChangeListener() {
     figma.on('selectionchange', () => {
         if (autoResizeEnabled) {
-            // 선택이 변경될 때마다 AutoSection 체크 (삭제 감지)
+            // throttle 적용된 함수 사용
             setTimeout(() => {
-                checkAllAutoSections();
-            }, 50); // 50ms 후 체크 (삭제 작업이 완료될 시간)
+                checkAllAutoSectionsThrottled();
+            }, 50);
         }
     });
 }
-// 자동 리사이징 모니터링 시작 (트리플 감지 시스템)
+// 자동 리사이징 모니터링 시작 (성능 최적화)
 function startAutoResizeListener() {
     autoResizeEnabled = true;
+    // 캐시 무효화
+    invalidateCache();
     // 선택 변경 이벤트 리스너 설정
     setupSelectionChangeListener();
-    // 200ms마다 섹션 변경 사항 확인 (주기적 체크)
+    // throttle 적용된 주기적 체크 (300ms로 늘려서 성능 개선)
     if (monitoringInterval) {
         clearInterval(monitoringInterval);
     }
     monitoringInterval = setInterval(() => {
-        checkAllAutoSections();
-    }, 200);
-    console.log(`[DEBUG] 트리플 감지 시스템 활성화:`);
-    console.log(`  - 선택 변경 감지: 50ms 디바운스`);
-    console.log(`  - 문서 변경 감지: 200ms 딜레이`);
-    console.log(`  - 주기적 체크: 200ms 간격`);
+        checkAllAutoSectionsThrottled();
+    }, 300);
+    console.log(`[PERF] 성능 최적화된 자동 리사이징 시스템 활성화 (300ms throttle)`);
     figma.ui.postMessage({
         type: 'info',
         message: '자동 리사이징 모드가 활성화되었습니다.'
     });
 }
-// 자동 리사이징 중지
+// 자동 리사이징 중지 (성능 최적화)
 function stopAutoResizeListener() {
     autoResizeEnabled = false;
     trackedSections.clear();
+    // 캐시 정리
+    invalidateCache();
     if (monitoringInterval) {
         clearInterval(monitoringInterval);
         monitoringInterval = null;
@@ -667,6 +753,10 @@ function stopAutoResizeListener() {
     if (debounceTimer) {
         clearTimeout(debounceTimer);
         debounceTimer = null;
+    }
+    if (throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
     }
     figma.ui.postMessage({
         type: 'info',
@@ -761,10 +851,10 @@ function debouncedCheckSelectionInfo() {
 figma.on('selectionchange', () => {
     console.log(`[DEBUG] 선택 변경 이벤트`);
     debouncedCheckSelectionInfo();
-    // 자동 리사이징이 활성화된 경우 변경사항 체크
+    // 자동 리사이징이 활성화된 경우 변경사항 체크 (throttle 적용)
     if (autoResizeEnabled) {
         setTimeout(() => {
-            checkAllAutoSections();
+            checkAllAutoSectionsThrottled();
         }, 100);
     }
 });
@@ -796,9 +886,9 @@ function setupDocumentChangeListener() {
                     }
                 }
                 if (needsCheck) {
-                    console.log(`[DEBUG] AutoSection 변경사항으로 인한 체크 실행`);
+                    console.log(`[PERF] AutoSection 변경사항으로 인한 체크 실행 (throttle)`);
                     setTimeout(() => {
-                        checkAllAutoSections();
+                        checkAllAutoSectionsThrottled();
                     }, 200); // 변경 완료 후 체크
                 }
             }
