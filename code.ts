@@ -1,5 +1,12 @@
 // AutoSection 플러그인 - 프레임을 자동으로 섹션으로 그룹화
 // 비개발자를 위한 Figma 플러그인
+// 
+// 🚀 성능 최적화:
+// - 선택 기반 처리: 전체 페이지 탐색 제거, 선택된 노드만 처리
+// - 스마트 캐싱: boundingBox, settings, children 등 5가지 캐시
+// - 해시 기반 변경 감지: JSON stringify 대신 빠른 해시 비교
+// - 통합 이벤트 처리: 중복 실행 방지, 200ms 지연
+// - 성능 모니터링: 실시간 통계 및 경고 시스템
 
 // 플러그인 UI 표시
 figma.showUI(__html__, { width: 350, height: 600 });
@@ -735,37 +742,12 @@ function autoResizeSection(section: SectionNode | FrameNode, customSettings?: Se
   }
 }
 
-// 성능 최적화된 AutoSection 검색 함수
-function findAutoSections(node: BaseNode): (SectionNode | FrameNode)[] {
-  const sections: (SectionNode | FrameNode)[] = [];
-  
-  // 빠른 사전 필터링: AutoSection_로 시작하지 않는 노드는 자식만 탐색
-  if (!node.name.startsWith('AutoSection_')) {
-    if ('children' in node) {
-      for (let i = 0; i < node.children.length; i++) {
-        sections.push(...findAutoSections(node.children[i]));
-      }
-    }
-    return sections;
-  }
-  
-  // AutoSection_로 시작하는 노드만 타입 검사
-  if (node.type === 'SECTION' || node.type === 'FRAME') {
-    sections.push(node as SectionNode | FrameNode);
-  }
-  
-  if ('children' in node) {
-    for (let i = 0; i < node.children.length; i++) {
-      sections.push(...findAutoSections(node.children[i]));
-    }
-  }
-  
-  return sections;
-}
+// 🚀 더 이상 사용하지 않는 전체 페이지 탐색 함수 (성능 최적화로 제거됨)
+// 대신 findRelevantAutoSections()가 선택 기반으로 동작함
 
 // 성능 최적화된 checkAllAutoSections 함수
-// 🚀 혁신적인 스마트 변경 감지 시스템
-function checkAllAutoSections() {
+// 🚀 선택 기반 스마트 변경 감지 시스템 (전체 페이지 탐색 제거)
+function checkSelectedAutoSections() {
   if (!autoResizeEnabled) return;
   
   // 🔥 중복 실행 방지 시스템
@@ -779,19 +761,20 @@ function checkAllAutoSections() {
   const startTime = Date.now();
   
   try {
-    const allAutoSections = findAutoSections(figma.currentPage);
+    // 🔥 선택 기반 AutoSection 찾기 (전체 페이지 탐색 대신)
+    const relevantSections = findRelevantAutoSections();
     
     // 🧪 성능 로깅
-    if (allAutoSections.length > 5) {
-      console.log(`[PERF] 검사 시작: ${allAutoSections.length}개 AutoSection`);
+    if (relevantSections.length > 0) {
+      console.log(`[PERF] 선택 기반 검사 시작: ${relevantSections.length}개 관련 AutoSection`);
     }
 
     let updatedCount = 0;
     let skippedCount = 0;
 
     // 🔥 초고속 변경 감지: 해시 기반 비교
-    for (let i = 0; i < allAutoSections.length; i++) {
-      const section = allAutoSections[i];
+    for (let i = 0; i < relevantSections.length; i++) {
+      const section = relevantSections[i];
       
       try {
         const sectionSettings = getCachedSectionSettings(section);
@@ -859,37 +842,76 @@ function checkAllAutoSections() {
       }
     }
     
-    // 🔥 삭제된 섹션 정리 (성능 최적화)
-    if (trackedSections.size > allAutoSections.length) {
-      const existingSectionIds = new Set(allAutoSections.map(s => s.id));
-      const toDelete: string[] = [];
-      
-      for (const trackedId of trackedSections.keys()) {
-        if (!existingSectionIds.has(trackedId)) {
-          toDelete.push(trackedId);
-        }
-      }
-      
-      for (const id of toDelete) {
-        trackedSections.delete(id);
-      }
-      
-      if (toDelete.length > 0) {
-        console.log(`[PERF] 삭제된 섹션 정리: ${toDelete.length}개`);
-      }
-    }
-    
     // 🧪 성능 리포트
     const totalDuration = Date.now() - startTime;
     recordPerformance('checkAllAutoSections', totalDuration);
     
     if (totalDuration > 50 || updatedCount > 0) {
-      console.log(`[PERF] 검사 완료: ${totalDuration}ms, 업데이트=${updatedCount}개, 스킵=${skippedCount}개, 전체=${allAutoSections.length}개`);
+      console.log(`[PERF] 선택 기반 검사 완료: ${totalDuration}ms, 업데이트=${updatedCount}개, 스킵=${skippedCount}개, 관련=${relevantSections.length}개`);
     }
     
   } catch (error) {
     console.error(`[PERF] 치명적 오류:`, error);
   }
+}
+
+// 🚀 선택 기반 관련 AutoSection 찾기 (전체 페이지 탐색 제거)
+function findRelevantAutoSections(): (SectionNode | FrameNode)[] {
+  const startTime = Date.now();
+  const relevantSections: (SectionNode | FrameNode)[] = [];
+  const selection = figma.currentPage.selection;
+  
+  // 선택이 없는 경우 추적 중인 섹션만 확인
+  if (selection.length === 0) {
+    for (const [sectionId] of trackedSections) {
+      try {
+        const node = figma.getNodeById(sectionId);
+        if (node && (node.type === 'SECTION' || node.type === 'FRAME') && 
+            node.name.startsWith('AutoSection_')) {
+          relevantSections.push(node as SectionNode | FrameNode);
+        }
+      } catch (error) {
+        // 노드가 삭제된 경우 추적에서 제거
+        trackedSections.delete(sectionId);
+      }
+    }
+    const duration = Date.now() - startTime;
+    console.log(`[PERF] 추적 섹션 확인: ${relevantSections.length}개, ${duration}ms`);
+    return relevantSections;
+  }
+
+  // 🔥 선택된 노드 기반으로 관련 AutoSection 찾기
+  const processedSections = new Set<string>();
+  
+  for (let i = 0; i < selection.length; i++) {
+    const selectedNode = selection[i];
+    
+    // 1. 선택된 노드가 AutoSection인 경우
+    if ((selectedNode.type === 'SECTION' || selectedNode.type === 'FRAME') && 
+        selectedNode.name.startsWith('AutoSection_') && 
+        !processedSections.has(selectedNode.id)) {
+      relevantSections.push(selectedNode as SectionNode | FrameNode);
+      processedSections.add(selectedNode.id);
+    }
+    
+    // 2. 선택된 노드의 부모 중 AutoSection 찾기
+    let currentParent = selectedNode.parent;
+    while (currentParent && currentParent.type !== 'PAGE') {
+      if ((currentParent.type === 'SECTION' || currentParent.type === 'FRAME') && 
+          currentParent.name.startsWith('AutoSection_') && 
+          !processedSections.has(currentParent.id)) {
+        relevantSections.push(currentParent as SectionNode | FrameNode);
+        processedSections.add(currentParent.id);
+        break; // 가장 가까운 AutoSection만 처리
+      }
+      currentParent = currentParent.parent;
+    }
+  }
+  
+  const duration = Date.now() - startTime;
+  console.log(`[PERF] 선택 기반 관련 섹션 찾기: ${relevantSections.length}개, ${duration}ms`);
+  
+  return relevantSections;
 }
 
 // 🚀 캐시된 섹션 설정 가져오기 (중복 호출 방지)
@@ -928,7 +950,7 @@ function scheduleUnifiedCheck(reason: string) {
   // 새로운 통합 검사 예약
   unifiedCheckTimer = setTimeout(() => {
     console.log(`[PERF] 통합 검사 실행: ${reason}`);
-    checkAllAutoSections();
+    checkSelectedAutoSections();
     unifiedCheckTimer = null;
   }, UNIFIED_CHECK_DELAY) as any;
 }
@@ -1193,32 +1215,14 @@ async function initializePlugin() {
     // 초기 선택 정보 전송
     checkSelectionInfo();
     
-    // 기존 AutoSection들을 추적 목록에 추가
-    function initializeExistingSections(node: BaseNode): void {
-      if ((node.type === 'SECTION' && node.name.startsWith('AutoSection_')) ||
-          (node.type === 'FRAME' && node.name.startsWith('AutoSection_'))) {
-        const section = node as SectionNode | FrameNode;
-        const visualNodes = getLayoutableChildren(section);
-        const settings = getSectionSettings(section);
-        
-        trackedSections.set(section.id, {
-          frameCount: visualNodes.length,
-          settings: settings,
-          lastHash: getSectionStateHash(section, settings),
-          lastUpdate: Date.now()
-        });
-        
-        console.log(`기존 섹션 추적 시작: ${section.name}, ${visualNodes.length}개 시각적 노드`);
-      }
-      
-      if ('children' in node) {
-        for (const child of node.children) {
-          initializeExistingSections(child);
-        }
-      }
+    // 🚀 선택 기반 초기화 (전체 페이지 탐색 제거)
+    function initializeExistingTrackedSections(): void {
+      // 기존 방식: 전체 페이지 탐색하지 않음
+      // 대신 처음 사용자가 선택하거나 이벤트가 발생할 때 필요에 따라 초기화
+      console.log('[PERF] 선택 기반 초기화 시스템 준비 완료 - 전체 페이지 탐색 없음');
     }
     
-    initializeExistingSections(figma.currentPage);
+    initializeExistingTrackedSections();
     
     // 자동 리사이징 시스템 활성화
     startAutoResizeListener();
